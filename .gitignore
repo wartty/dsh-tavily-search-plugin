@@ -1,0 +1,31 @@
+# ---- Build artifacts (regenerable via `pnpm build`) ----
+/lib/
+*.tsbuildinfo
+
+# ---- Dependencies ----
+/node_modules/
+
+# ---- Editor / OS ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ---- Logs ----
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# ---- Local env (don't commit secrets) ----
+.env
+.env.local
+.env.*.local
+
+# ---- Test output ----
+coverage/
+*.lcov
+
+# ---- tsdown ----
+.tsdown/

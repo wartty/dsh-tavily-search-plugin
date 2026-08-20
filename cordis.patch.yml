@@ -1,0 +1,30 @@
+# dsh-tavily-search-plugin — bundle layer for the user's dsh profile.
+#
+# Loaded automatically when the package is installed into a profile (see
+# `package.json` `dsh.bundle.patch`). Two entries:
+#   1. `- insert:` installs the Tavily provider into the plugin table.
+#   2. `- id: web config.searchProvider: tavily` pins the web seam to the
+#      Tavily provider; without this pin, DSH throws `WEB_PROVIDER_AMBIGUOUS`
+#      when both DeepSeek and Tavily are registered (see
+#      `packages/web/web/src/index.ts` `resolveProvider`).
+#
+# To override defaults (e.g. a self-hosted Tavily proxy), add a second
+# `- id: web-search-tavily config:` block. The host half reads these values
+# on every search, so a restart is needed for host changes to take effect.
+#
+# Optional configuration keys for `id: web-search-tavily`:
+#   apiKey:         literal Tavily API key (avoid committing)
+#   apiKeyEnv:      credential reference name (default TAVILY_API_KEY)
+#   baseURL:        endpoint base (default https://api.tavily.com)
+#   topic:          "general" | "news" (default news; biases toward fresh sources)
+#   days:           positive integer; limit results to last N days (default 7; 0 disables)
+#   searchDepth:    "basic" | "advanced" (default basic)
+#   maxResults:     positive integer (default 7)
+#   includeAnswer:  true | false (default true)
+
+- insert:
+    - id: web-search-tavily
+      name: dsh-tavily-search-plugin
+- id: web
+  config:
+    searchProvider: tavily
