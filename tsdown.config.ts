@@ -15,6 +15,33 @@
 
 import { defineConfig } from 'tsdown'
 
+/**
+ * Compiler overrides handed to `rolldown-plugin-dts` for declaration emit.
+ *
+ * The host tsconfig (used for IDE / `tsc --noEmit`) sets `noEmit: true` and
+ * uses `target: ES2024`, but TypeScript 5.4 (the version pinned in
+ * `peerDependencies`) only recognises `target`/`lib` up to `ES2023` /
+ * `ESNext`. With `ES2024` the dts emitter silently drops every lib entry
+ * and reports TS4033 / TS4055 ("private name 'Promise'") on every exported
+ * type that mentions a global. We work around this with a dedicated tsconfig
+ * that downgrades the target to `ESNext` and the lib to `ES2023`; the
+ * emitted `.d.ts` is identical in shape either way for our ESM-only host.
+ */
+const DTS_COMPILER_OPTIONS = {
+  target: 'ESNext',
+  module: 'ESNext',
+  moduleResolution: 'Bundler',
+  lib: ['ES2023', 'DOM', 'DOM.Iterable'],
+  jsx: 'react-jsx',
+  strict: true,
+  skipLibCheck: true,
+  esModuleInterop: true,
+  allowSyntheticDefaultImports: true,
+  resolveJsonModule: true,
+  isolatedModules: true,
+  noEmit: false,
+} as const
+
 /** Host half: ESM Node library, emitted as lib/index.js for the Cordis loader. */
 const lib = {
   entry: ['src/index.ts'],
@@ -22,7 +49,10 @@ const lib = {
   format: ['esm'],
   platform: 'node',
   target: 'es2024',
-  dts: true,
+  dts: {
+    tsconfig: './tsconfig.dts.json',
+    compilerOptions: DTS_COMPILER_OPTIONS,
+  },
   clean: true,
   fixedExtension: false,
 }
