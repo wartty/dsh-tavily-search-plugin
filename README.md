@@ -100,6 +100,7 @@ Content-Type: application/json
 ## 目录 / Table of Contents
 
 - [快速开始 / Quick Start](#快速开始--quick-start)
+- [官方推荐安装 / Official install (DSH ≥ 0.1.1)](#官方推荐安装--official-install-dsh--0111)
 - [安装流程 / Installation](#安装流程--installation)
   - [0. 前置条件](#0-前置条件--prerequisites)
   - [1. 安装插件](#1-安装插件--install-the-plugin)
@@ -113,9 +114,86 @@ Content-Type: application/json
 - [故障排查](#故障排查--troubleshooting)
 - [卸载](#卸载--uninstall)
 - [开发与本地构建](#开发与本地构建--development)
+  - [构建注意事项 / Build caveats](#构建注意事项--build-caveats)
 - [兼容性矩阵](#兼容性矩阵--compatibility)
 - [已知限制](#已知限制--known-limitations)
 - [License](#license)
+
+---
+
+## 官方推荐安装 / Official install (DSH ≥ 0.1.1)
+
+> **DSH 0.1.1+ 的现代 loader 会自动把 bundle 自带的 `cordis.patch.yml` 合入 profile** —— 不需要手动编辑 `~/.dsh/profiles/web/cordis.patch.yml`。这是当前推荐路径,与 [develop/basic](https://deepseek-harness.github.io/deepseek-harness/develop/basic/) 文档一致。DSH < 0.1.1 没有 `dsh.profile.bundles` 入口,回到 [§ 安装流程 / Installation](#安装流程--installation) 的手动 patch 合并方式。
+
+两步:把插件装进 profile + 在 profile 的 `package.json` 里把它登记成 bundle。
+
+### A. 安装到 profile
+
+```bash
+cd ~/.dsh/profiles/web
+
+# 方式 1 — 从 GitHub(发布后)
+pnpm add --save github:<your-org>/dsh-tavily-search-plugin
+
+# 方式 2 — 本地开发,link: 软链(改源码即时生效,只需重启 DSH)
+pnpm add --save "link:/absolute/path/to/dsh-tavily-search-plugin"
+
+# 方式 3 — 本地开发,file: 复制(不推荐;见故障排查)
+pnpm add --save "file:/absolute/path/to/dsh-tavily-search-plugin"
+```
+
+### B. 登记成 bundle
+
+打开 `~/.dsh/profiles/web/package.json`,在 `dsh.profile.bundles` 数组末尾追加插件名:
+
+```jsonc
+{
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app",
+        "dsh-tavily-search-plugin"   // ← 追加这一行
+      ]
+    }
+  },
+  "dependencies": {
+    "dsh-tavily-search-plugin": "link:/absolute/path/to/dsh-tavily-search-plugin"
+  }
+}
+```
+
+> **为什么 `pnpm add` 之后还要登记?** loader 只扫描 `dsh.profile.bundles` 里列出的包 —— 仅靠 `dependencies` 字段不会触发加载,因为 node-half 的 `require.resolve('${name}/package.json')` 找不到 `dsh.bundle.patch`。这是单仓内 bundle 之外的「外部插件」必须走的一步,详见 [FAQ § `dsh.bundle.patch` 字段](#qdshbundlepatch-字段不是会让-cordispatchyml-自动合入吗) 与 [故障排查 § 搜索走了 DeepSeek 而不是 Tavily](#搜索走了-deepseek-而不是-tavily)。
+
+### C. 验证 loader 已注册
+
+DSH 启动时 `prepareProfile(...)` 会按顺序合入 `bundles` 数组里每个包的 `cordis.patch.yml`。三种方法(任选其一即可确认接通):
+
+1. **看 `__DSH_BOOT__` 全局变量** —— 浏览器打开 DSH web,DevTools Console:
+   ```js
+   __DSH_BOOT__
+   // entries[] 里应当出现:
+   // { id: "dsh-tavily-search-plugin",
+   //   url: "/plugins/dsh-tavily-search-plugin/client.js?rev=<hash>",
+   //   rev: "<hash>", inject: ["slots"] }
+   ```
+
+2. **直接 GET client bundle**(HTTP 状态码即可):
+   ```bash
+   curl -fsS -o /dev/null -w "%{http_code}\n" \
+     'http://127.0.0.1:3080/plugins/dsh-tavily-search-plugin/client.js'
+   # 期望: 200
+   ```
+
+3. **CLI 导出合并后的 cordis 配置**:
+   ```bash
+   node apps/cli/lib/bin.js --profile web --dump-default-config
+   ```
+   输出里应看到 `# == dsh-tavily-search-plugin` 注释段,以及 `- id: web-search-tavily / name: dsh-tavily-search-plugin` 与 `- id: web config.searchProvider: tavily` 两段 patch 已合入。
+
+### D. 配置 API Key + 重启
+
+参见 [快速开始 §2 / §3](#快速开始--quick-start) 的环境变量 / UI 卡片 / 重启步骤。
 
 ---
 
@@ -205,9 +283,11 @@ cp -r lib cordis.patch.yml package.json \
       ~/.dsh/profiles/web/node_modules/dsh-tavily-search-plugin/
 ```
 
-#### 合并 cordis.patch.yml(三种方式都要做)
+#### 合并 cordis.patch.yml(仅 DSH < 0.1.1 需要)
 
-`dsh.bundle.patch` 字段仅对单仓内的 bundle 生效;**外部插件不会自动合入 profile 的 `cordis.yml`**。你需要手动把本插件的 patch 内容追加到:
+DSH ≥ 0.1.1 的现代 loader 会自动把 `cordis.patch.yml` 合入 profile,见 [§ 官方推荐安装](#官方推荐安装--official-install-dsh--0111);**这段手动合并步骤只在 DSH < 0.1.1 适用**。
+
+`dsh.bundle.patch` 字段仅在 `dsh.profile.bundles` 没列出来时不被 loader 读取。对于 DSH < 0.1.1(无 `dsh.profile.bundles`),需要手动把本插件的 patch 内容追加到:
 
 ```
 ~/.dsh/profiles/web/cordis.patch.yml
@@ -537,7 +617,9 @@ A:字段布局一致(API key + endpoint + max uses/results),但 Tavily 卡片没
 A:不会。本插件的所有 UI 代码都自己带,不依赖 DSH `ui-settings-plugins` 包内部的组件。DSH 升级只要不破坏 `@deepseek-ai/cordis` 的 `ctx.slots` 接口,卡片就还在。
 
 ### Q:`dsh.bundle.patch` 字段不是会让 cordis.patch.yml 自动合入吗?
-A:**不会(对外部插件来说)**。`dsh.bundle.patch` 是 DSH 给单仓内 bundle 用的 hint —— 它告诉 DSH "这个 bundle 自带一份 cordis patch"。外部插件通过 `pnpm add` 装进 profile 后,DSH 不会去读插件自带的 `cordis.patch.yml`。你必须**手动**把 patch 内容追加到 `~/.dsh/profiles/web/cordis.patch.yml`。这是已知的 footgun,见 [故障排查](#搜索走了-deepseek-而不是-tavily)。
+A:**DSH ≥ 0.1.1 会**,只要插件名出现在 `~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles` 数组里 —— `prepareProfile(...)` 会按顺序读取每个 bundle 的 `cordis.patch.yml` 并合入 profile 的 `cordis.yml`。所以官方推荐路径是 [§ 官方推荐安装](#官方推荐安装--official-install-dsh--0111),不需要手动 patch 合并。
+
+**DSH < 0.1.1 不会自动合入** —— 那时还没有 `dsh.profile.bundles`,外部插件通过 `pnpm add` 装进 profile 后,DSH 不会读插件自带的 `cordis.patch.yml`,必须手动把 patch 内容追加到 `~/.dsh/profiles/web/cordis.patch.yml`。这是已知 footgun,见 [§ 安装流程 / Installation](#安装流程--installation) 与 [故障排查](#搜索走了-deepseek-而不是-tavily)。
 
 ### Q:可以用本插件的 host 半但用自己写的 UI 卡片吗?
 A:可以,host 半 (`src/index.ts` → `lib/index.js`) 完全独立。`installSettingsSection` 安装的 `web-search-tavily` namespace 是公共的,任何 client 半插件都可以 `ctx.settingsScope.bind({namespace: 'web-search-tavily'})` 读取并编辑它。
@@ -784,6 +866,46 @@ pnpm build              # 重新构建
 pnpm dsh web --verbose  # 或 --log-level=debug
 ```
 
+### 构建注意事项 / Build caveats
+
+踩过两次坑,记录下来省新人再走一遍:
+
+- **`pnpm prepare` 会自动跑 `tsdown`** —— `package.json` 里 `"prepare": "tsdown"` 触发时机是 `pnpm install` / `pnpm add` 之后。所以从 GitHub 安装(方式 1)不需要手动 `pnpm build`,装完 `lib/` 就已经在包里了。本地开发时改完 `src/` 还是要手动 `pnpm build`。
+
+- **TypeScript 5.4 不识别 `target: ES2024` / `lib: ['ES2024']`** —— `peerDependencies` 锁的是 `^5.4.0`,该版本只到 `ES2023` / `ESNext`。如果 `tsconfig.json` 写了 `ES2024`,TS 会**静默丢弃** lib 选项,导致 `tsdown` 的 dts 插件报:
+  ```
+  error TS4033: Property 'resolveApiKey' of exported interface has or is using
+                private name 'Promise'.
+  error TS4055: ...
+  ```
+  解决方式:**根 `tsconfig.json` 维持 `ES2024`/`DOM`(给 IDE 用),另起一个 `tsconfig.dts.json`** 只用于 dts emit:
+  ```jsonc
+  // tsconfig.dts.json
+  {
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+      "target": "ESNext",
+      "module": "ESNext",
+      "lib": ["ES2023", "DOM", "DOM.Iterable"],
+      "noEmit": false
+    }
+  }
+  ```
+  然后在 `tsdown.config.ts` 里把 host 配置改成:
+  ```ts
+  dts: { tsconfig: './tsconfig.dts.json',
+         compilerOptions: { target: 'ESNext',
+                            lib: ['ES2023', 'DOM', 'DOM.Iterable'],
+                            noEmit: false } }
+  ```
+  客户端 bundle 不走 dts emit(`dts: false`),不受这个坑影响。
+
+- **典型产物大小**:host `lib/index.js` ~9.6 KB(host 半 + d.ts ~6.3 KB),client `lib/client.js` ~26 KB(gzip ~8 KB),全在 DSH `<plugins>` 静态服务允许范围内。
+
+- **`@deepseek-ai/dsh-*` peer deps 标 `*`** —— 这意味着不锁版本,跟当前 DSH 一起发版就行。如果改用新 DSH 后 host 类型报错,先 `pnpm install` 让 pnpm 拉取 workspace 中最新的 DSH 包,再 `pnpm build`。
+
+- **client bundle 的 external 只有 `react`** —— `noExternal` 把所有 `@deepseek-ai/*` 内联进 bundle,这是官方 `dsh-plugin-template` 的同款做法;浏览器模块表已经暴露 `react` + 4 个平台模块(`@deepseek-ai/cordis` 等),剩下的 inline 才能被独立构建而不走 Vite 解析。
+
 ### 发布到 GitHub
 
 ```bash
@@ -815,6 +937,7 @@ pnpm add --save github:<your-org>/dsh-tavily-search-plugin
 | 0.1.0-rc.5 ~ 0.1.0-rc.7 | ⚠️ 需要手动加 settings 白名单 | 见 [故障排查](#启动时报-web_settings_namespaces-not-found) |
 | 0.1.0-rc.8 ~ rc.9 | ✅ 直接装 | 但需要显式设 `searchProvider: tavily` |
 | ≥ 0.1.0-rc.10 | ✅ 直接装 | 本插件开箱即用 |
+| ≥ 0.1.1 | ✅ 直接装 | `dsh.profile.bundles` 路径生效,`cordis.patch.yml` 由 loader 自动合入 —— 走 [§ 官方推荐安装](#官方推荐安装--official-install-dsh--0111) |
 | Node ≥ 20 | ✅ | DSH 自身要求 |
 | Node 18 | ❌ | DSH 已不支持 |
 | Tavily API v1 | ✅ | 本插件用 `/search` endpoint,标准 v1 协议 |
@@ -827,6 +950,7 @@ pnpm add --save github:<your-org>/dsh-tavily-search-plugin
 | macOS 14 | 20.x | 9.x | 0.1.0-rc.10 |
 | Ubuntu 22.04 | 20.x | 9.x | 0.1.0-rc.10 |
 | Windows 11 | 20.x | 9.x | 0.1.0-rc.10 |
+| Ubuntu 24.04 | 24.x | 11.x | **0.1.1-rc.2**(本次安装实测) |
 
 ---
 
