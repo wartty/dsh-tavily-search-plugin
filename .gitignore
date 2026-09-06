@@ -29,3 +29,6 @@ coverage/
 
 # ---- tsdown ----
 .tsdown/
+
+# ---- Local reference docs (Tavily upstream, not part of this repo) ----
+/docs/

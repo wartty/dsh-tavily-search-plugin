@@ -29,7 +29,7 @@ DeepSeek Harness 自带的 `web_search` 工具默认走 DeepSeek 自己的搜索
 |--------|-------------------|-----------------|
 | 计费 | DeepSeek 自己的搜索 API,具体计费策略按 DSH 文档 | 免费额度 1000 次/月;超出 $0.008/次 |
 | `content` 总结 | 无(只返回链接) | ✓ `include_answer` 直接给模型一段自然语言段落 |
-| 时间过滤 | 无 | ✓ `topic: 'news'` + `days: 7` 默认偏向新鲜内容 |
+| 时间过滤 | 无 | ✓ `timeRange` / `startDate` / `endDate` 可按需限定时间窗(默认不限) |
 | 离线/自托管 | 不支持 | ✓ 改 `baseURL` 即可指向自有 Tavily 兼容服务 |
 | 配置入口 | DSH 内置 YAML | DSH 内置 YAML **或** UI 卡片 |
 
@@ -44,7 +44,7 @@ DeepSeek Harness 自带的 `web_search` 工具默认走 DeepSeek 自己的搜索
   1. `cordis.patch.yml` 字面量
   2. 启动环境变量 `TAVILY_API_KEY`
   3. UI 卡片运行时写入
-- ✅ **默认偏向新鲜内容**:`topic: 'news'` + `days: 7` —— 「今天的新闻」拿到的就是当天而不是去年的归档。
+- ✅ **默认通用搜索**:`topic: 'general'` + `searchDepth: 'advanced'` 让技术/长尾查询返回高相关 snippet;要实时新闻就在卡片里把主题切成 `news` 并设时间范围。
 - ✅ **默认 7 条结果**,UI 可覆盖;插件层做 `Math.min(requested, maxResults)` 硬封顶,防 Tavily 配额被滥用。
 - ✅ **完整错误映射**:HTTP 错误 → `WEB_PROVIDER_ERROR`、abort → `WEB_ABORTED`、未配置 → `WEB_PROVIDER_CONFIGURED_MISSING` / `_UNAVAILABLE`,沿用 DSH 的 `WebError` 类型。
 - ✅ **可逆**:卸载后 DSH 完全恢复(详见 §卸载)。
@@ -55,7 +55,7 @@ DeepSeek Harness 自带的 `web_search` 工具默认走 DeepSeek 自己的搜索
 
 发到 DSH 聊天界面里的 prompt:
 
-> 搜索今日的科技新闻
+> 搜索 `DeepSeek Harness 的 web_search 怎么接 Tavily`(通用技术查询,默认配置)
 
 实际打到 Tavily 的请求:
 
@@ -65,11 +65,11 @@ Authorization: Bearer tvly-XXXXXXXXXXXX
 Content-Type: application/json
 
 {
-  "query": "今日的科技新闻",
-  "topic": "news",
-  "search_depth": "basic",
+  "query": "DeepSeek Harness 的 web_search 怎么接 Tavily",
+  "topic": "general",
+  "search_depth": "advanced",
   "max_results": 7,
-  "days": 7,
+  "chunks_per_source": 1,
   "include_answer": true,
   "include_raw_content": false,
   "include_images": false
@@ -80,20 +80,16 @@ Content-Type: application/json
 
 ```jsonc
 {
-  "answer": "Today's top tech news includes the launch of \"ChatGPT for Teens\" by OpenAI ...",
+  "answer": "To wire web_search to Tavily, register a WebSearchProvider …",
   "results": [
-    { "url": "https://www.cnn.com/.../openai-chatgpt-for-teens",  "title": "OpenAI rolling out 'ChatGPT for Teens'", "content": "..." },
-    { "url": "https://www.cnbc.com/.../earnings-growth-broadening", "title": "Don't massively overweigh tech, ...", "content": "..." },
-    { "url": "https://www.cnbc.com/.../cctv-weekly-script",          "title": "CCTV Weekly Script 14/08/26",       "content": "..." },
-    { "url": "https://www.marketingweek.com/.../week-in-tech",     "title": "The Week in Tech: A landmark trial for Meta", "content": "..." },
-    { "url": "https://www.cnbc.com/.../late-morning-rundown",      "title": "The Late Morning Rundown: August 17, 2026", "content": "..." },
-    { "url": "https://www.phonearena.com/.../foldable-iphone",     "title": "I don't think the foldable iPhone stands a chance against the Galaxy Z Fold 8", "content": "..." },
-    { "url": "https://www.cnbc.com/.../memory-stocks-claw-back",   "title": "Memory stocks claw back",          "content": "..." }
+    { "url": "https://deepseek-harness.github.io/...", "title": "web seam reference",      "content": "…" },
+    { "url": "https://github.com/.../dsh-web-search-*", "title": "official provider example", "content": "…" },
+    { "url": "https://docs.tavily.com/...",              "title": "Tavily Search API",       "content": "…" }
   ]
 }
 ```
 
-7 条结果全部来自 CNN / CNBC / Marketing Week / PhoneArena 等正经新闻机构,日期全部在最近 7 天 —— 这是 `topic: 'news'` + `days: 7` 默认值的实际效果。
+结果高度相关、无新闻混入,因为默认已是 `topic: 'general'` + `search_depth: 'advanced'` + `chunks_per_source: 1`。要搜**实时新闻**时,在卡片里把「主题类别」切成 `news`、设置「时间范围」,`topic`/`timeRange` 会据此在请求体里带上 `topic: "news"` 和 `time_range`。
 
 ---
 
@@ -364,7 +360,7 @@ pnpm dsh web
 
 ### 时间新鲜度
 
-来源日期应当在 `days` 窗口内(默认 7 天)。把卡片 / cordis patch 里改 `days: 0`,就关掉时间窗口,任意时间的页面都会进。
+默认**不限时间窗**(`topic: 'general'` + `days: 0`),任意时间的页面都会进。要限定时效,在卡片里设置「时间范围」或「回溯天数」。
 
 ### UI 卡片验证
 
@@ -399,12 +395,18 @@ pnpm dsh web
 | 字段 / Field | 类型 / Type | 默认 / Default | 说明 / Notes |
 |--------------|-------------|----------------|--------------|
 | `apiKey` | string | _(空)_ | 直接字面量,标 `.role('secret')`。**不要**写进 git。卡片可写。 |
-| `apiKeyEnv` | string | `TAVILY_API_KEY` | 凭证引用名。插件会从 launch environment 读这个变量。**卡片未暴露,改用 `cordis.patch.yml`** |
+| `apiKeyEnv` | string | `TAVILY_API_KEY` | 凭证引用名。卡片通过「API key」输入框编辑(固定 `TAVILY_API_KEY`)。 |
 | `baseURL` | string | `https://api.tavily.com` | 端点。末尾的 `/search` 由插件自动追加,**不要带尾斜杠**。卡片可写。 |
-| `maxResults` | number | `7` | 单次最多返回的搜索结果数。插件层硬封顶。卡片可写。 |
-| `topic` | `'general'` \| `'news'` | `'news'` | Tavily 的内容主题。`'news'` 偏向新闻源 + 时效。改 `'general'` 放开到全网。**卡片未暴露,改用 `cordis.patch.yml`** |
-| `days` | number | `7` | 仅返回最近 N 天的结果。和 `topic: 'news'` 配合,确保「今天的新闻」拿到的是当天而不是 2025 归档。改 `0` 或删掉可以拿掉时间窗口。**卡片未暴露,改用 `cordis.patch.yml`** |
-| `searchDepth` | `'basic'` \| `'advanced'` | `'basic'` | Tavily 的搜索深度,`advanced` 更准但更贵。**卡片未暴露,改用 `cordis.patch.yml`** |
+| `maxResults` | number | `7` | 单次最多返回的搜索结果数(1–20,上限为 Tavily API 硬限制)。插件层硬封顶。卡片可写。 |
+| `searchDepth` | `'basic'`\|`'advanced'`\|`'fast'`\|`'ultra-fast'` | `'advanced'` | Tavily 搜索深度。`advanced` 计 2 credit,其余计 1 credit。卡片可写(下拉)。 |
+| `topic` | `'general'`\|`'news'`\|`'finance'` | `'general'` | Tavily 主题类别。`'general'` 通用/技术查询,`'news'` 实时新闻,`'finance'` 财经数据。卡片可写(下拉)。 |
+| `days` | number | `0` | 仅返回最近 N 天的结果(`0` = 不限,默认)。仅 `topic: 'news'` 生效;**兼容旧配置的字段,`timeRange` 设置后优先**。卡片可写。 |
+| `timeRange` | `'day'`\|`'week'`\|`'month'`\|`'year'`\|`'d'`\|`'w'`\|`'m'`\|`'y'` | _(空)_ | Tavily 现行时间窗形式。设置后优先于 `days`。卡片可写(下拉)。 |
+| `startDate` | string | _(空)_ | 仅返回该日期(`YYYY-MM-DD`)之后发布/更新的结果。卡片可写。 |
+| `endDate` | string | _(空)_ | 仅返回该日期(`YYYY-MM-DD`)之前发布/更新的结果。卡片可写。 |
+| `includeDomains` | string[] | `[]` | 结果限定在这些域名(最多 300)。卡片可写(逗号分隔)。 |
+| `excludeDomains` | string[] | `[]` | 从结果排除这些域名(最多 150)。卡片可写(逗号分隔)。 |
+| `chunksPerSource` | number | `1` | 每个来源返回的内容块数(1–3,每块 ≤500 字符)。默认 `1` 让 snippet 更短更聚焦。卡片可写。 |
 | `includeAnswer` | boolean | `true` | 让 Tavily 顺便返回一段自然语言 `answer`,模型能直接引用。**卡片未暴露,改用 `cordis.patch.yml`** |
 
 ### 三种注入方式(从高到低优先级)
@@ -422,9 +424,15 @@ pnpm dsh web
     apiKeyEnv: MY_TAVILY_KEY                    # 用其他环境变量名
     baseURL: https://tavily-proxy.internal      # 自托管代理
     maxResults: 10
-    topic: general                              # 放开到全网(不再是 news-only)
-    days: 0                                     # 拿掉时间窗口
-    searchDepth: advanced                       # 更准,但 Tavily 配额消耗翻倍
+    searchDepth: advanced                       # basic|advanced|fast|ultra-fast
+    topic: finance                              # general|news|finance
+    timeRange: week                             # day|week|month|year;优先于 days
+    # days: 0                                   # 旧版时间窗字段,timeRange 设置后忽略
+    startDate: '2026-01-01'                     # 仅返回该日期之后
+    endDate: '2026-12-31'                       # 仅返回该日期之前
+    includeDomains: [news.site.org, example.com]
+    excludeDomains: [spam.example]
+    chunksPerSource: 2                          # 1–3
     includeAnswer: true
 ```
 
@@ -456,10 +464,10 @@ pnpm dsh web
 #    Payload:
 #    {
 #      "query": "...",
-#      "topic": "news",
-#      "search_depth": "basic",
+#      "topic": "general",
+#      "search_depth": "advanced",
 #      "max_results": 7,
-#      "days": 7,
+#      "chunks_per_source": 1,
 #      "include_answer": true,
 #      "include_raw_content": false,
 #      "include_images": false
@@ -551,10 +559,10 @@ export function apply(ctx: Context, config: TavilyConfig): void {
    Authorization: Bearer <key>
    {
      "query": request.query,
-     "topic": options.topic,             // 'news'
-     "search_depth": options.searchDepth, // 'basic'
+     "topic": options.topic,             // 'general'
+     "search_depth": options.searchDepth, // 'advanced'
      "max_results": maxResults,          // 7
-     "days": options.days,               // 7
+     "chunks_per_source": options.chunksPerSource, // 1
      "include_answer": options.includeAnswer, // true
      ...
    }
@@ -604,14 +612,14 @@ ctx.slots.register(
 ### Q:为什么不用内置的 DeepSeek 搜索?
 A:Tavily 有三件事是 DeepSeek 自带搜索做不到的:
 1. **`include_answer`** —— Tavily 直接给模型一段自然语言总结,不用模型自己再读 7 个网页拼接。
-2. **时间过滤** —— `topic: 'news'` + `days: 7` 让结果天然偏向当前事件。
+2. **时间过滤** —— `timeRange` / `startDate` / `endDate` 可按需限定时间窗;默认不限,搜技术资料不会被"最近 7 天"误过滤。
 3. **成本可控** —— 免费层 1000 次/月,适合日常开发;超出按 $0.008/次,可预测。
 
 ### Q:能用其他搜索服务(Exa / SerpAPI / Brave)吗?
 A:可以,照着 `src/index.ts` 写一个新的 `XxxSearchProvider` 注册到 `ctx.web.registerSearchProvider(...)` 即可。`id` 不要和 `tavily` 撞就行。本仓库专注于 Tavily,不做多后端。
 
 ### Q:卡片和 DSH 内置的 WebSearchCard 长一样吗?
-A:字段布局一致(API key + endpoint + max uses/results),但 Tavily 卡片没有 `searchDepth` / `topic` / `days` / `includeAnswer` 输入项,这些是 host 半的合法 schema 字段但不在 UI 暴露 —— 这是为了和内置 WebSearchCard 的精简设置面保持一致。需要在这些维度调整时,直接改 `cordis.patch.yml`。
+A:基本字段(API key + endpoint + 结果上限)与内置卡片一致;在此之上新增了下拉/输入项覆盖 Tavily 的完整可调面:`searchDepth` / `topic` / `timeRange` / `days` / `startDate` / `endDate` / `chunksPerSource` / `includeDomains` / `excludeDomains`。唯一未暴露的是 `includeAnswer`(保持 YAML-only),要关掉自然语言总结就在 `cordis.patch.yml` 写 `includeAnswer: false`。
 
 ### Q:DSH 升级后卡片会不会消失?
 A:不会。本插件的所有 UI 代码都自己带,不依赖 DSH `ui-settings-plugins` 包内部的组件。DSH 升级只要不破坏 `@deepseek-ai/cordis` 的 `ctx.slots` 接口,卡片就还在。
@@ -957,26 +965,17 @@ pnpm add --save github:<your-org>/dsh-tavily-search-plugin
 ## 已知限制 / Known limitations
 
 - **`maxResults` 是插件层硬封顶**:即便 `web_search` 工具本身请求了更多结果,Tavily 也不会收到超过 `options.maxResults` 的 `max_results`。这是为了让免费额度可控;如果你想突破这个上限,直接修改 `src/index.ts` 的 `Math.min(...)` 行。
-- **不支持图片搜索**:`include_images: false` 写死。如果要支持,自行放开(同时考虑上下文窗口)。
+- **`includeAnswer` 不通过 UI 卡片暴露**:它仍是 host 半的合法 schema 字段(写进请求体的 `include_answer`),只是 UI 不渲染。要关掉自然语言总结,在 `cordis.patch.yml` 里写 `includeAnswer: false`。
+- **`include_images` / `include_raw_content` 写死 `false`**:如需图片或原始 HTML,自行放开 `search()` 里的对应字段(同时考虑上下文窗口)。
 - **没有重试逻辑**:HTTP 5xx 直接抛 `WEB_PROVIDER_ERROR`。DSH 上层会决定是否重试。
 - **`cordis.yml` 是冷启动配置** —— HMR 不适用,改完必须重启。
 - **`cordis.patch.yml` 字段是整体替换**,不要尝试在已有 `web:` 节点下追加。
-- **`searchDepth` / `topic` / `days` / `includeAnswer` 不在 UI 卡片中暴露**:它们仍然是 host 半的合法 schema 字段(写进 Tavily 请求体 `search_depth` / `topic` / `days` / `include_answer`),只是 UI 不渲染 —— 这是为了和内置 WebSearchCard 保持一致的精简设置面。如需启用 `advanced` 深度、把内容放开到 `general`、扩大时间窗口,直接在 `cordis.patch.yml` 里:
-  ```yaml
-  - id: web-search-tavily
-    config:
-      searchDepth: advanced      # 或 'basic'
-      topic: general             # 或 'news'(默认)
-      days: 30                   # 默认 7;改 0 或注释掉可以拿掉时间窗口
-      includeAnswer: false       # 或 true
-  ```
 
 ---
 
 ## Roadmap / 路线图
 
 - [ ] 多 provider 支持(允许用户同时启用 Tavily + Exa,按 query routing)
-- [ ] UI 卡片里把 `topic` / `days` / `searchDepth` / `includeAnswer` 暴露为高级折叠区
 - [ ] 流式 answer(目前是单段返回)
 - [ ] Per-query cost estimate(读 Tavily Dashboard 的配额 API)
 
