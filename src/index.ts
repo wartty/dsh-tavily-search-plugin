@@ -24,6 +24,7 @@ import z from '@deepseek-ai/schemastery'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import packageJson from '../package.json' with { type: 'json' }
 
 /** Cordis plugin name used by loader diagnostics and the settings namespace. */
 export const name = 'web-search-tavily'
@@ -37,8 +38,10 @@ export const TAVILY_PROVIDER_ID = 'tavily'
 /** Default Tavily search endpoint; `/search` is the operation. */
 export const TAVILY_DEFAULT_BASE_URL = 'https://api.tavily.com'
 
-/** Default search depth Tavily applies when a request doesn't override it. */
-export const TAVILY_DEFAULT_SEARCH_DEPTH = 'basic'
+/** Default search depth Tavily applies when a request doesn't override it.
+ * `advanced` returns higher-relevance, multi-snippet content (2 credits/req);
+ * the cheaper `basic`/`fast`/`ultra-fast` (1 credit) are one card toggle away. */
+export const TAVILY_DEFAULT_SEARCH_DEPTH = 'advanced' as const
 
 /** Default for asking Tavily to also generate a natural-language answer. */
 export const TAVILY_DEFAULT_INCLUDE_ANSWER = true
@@ -46,25 +49,41 @@ export const TAVILY_DEFAULT_INCLUDE_ANSWER = true
 /** Default number of results Tavily returns when neither the caller nor the section names one. */
 export const TAVILY_DEFAULT_MAX_RESULTS = 7
 
-/**
- * Default `topic` passed to Tavily. `'news'` biases results toward news-article
- * sources and (crucially) toward fresh content — without it, Tavily's `general`
- * topic returns whatever it has indexed, which for a 2026 query can surface
- * 2025/older pages and skip the day's headlines.
- */
-export const TAVILY_DEFAULT_TOPIC: 'general' | 'news' = 'news'
+/** Default content chunks retrieved per source; `1` keeps snippets short and focused. */
+export const TAVILY_DEFAULT_CHUNKS_PER_SOURCE = 1
 
 /**
- * Default `days` window passed to Tavily. Restricts results to the last N days;
- * combined with `topic: 'news'` this guarantees that queries like "今天的新闻"
- * land on today's headlines rather than 2025 archive pages that happen to
- * contain the same keywords. Override via cordis.patch.yml if you need older
- * material.
+ * Default `topic` passed to Tavily. `'general'` is the broad-relevance mode
+ * suited to technical and long-tail queries; switch to `'news'` (card dropdown)
+ * when you specifically want real-time headlines, or `'finance'` for market data.
  */
-export const TAVILY_DEFAULT_DAYS = 7
+export const TAVILY_DEFAULT_TOPIC: TavilyTopic = 'general'
 
-/** Attribution header sent on every request. */
-const USER_AGENT = 'deepseek-harness-tavily/0.2.0'
+/**
+ * Default `days` time window handed to Tavily. `0` means "no window" — the
+ * sensible default for `topic: 'general'` technical queries, so older reference
+ * pages aren't filtered out. Only effective under `topic: 'news'`; the newer
+ * `timeRange` field takes precedence when set.
+ */
+export const TAVILY_DEFAULT_DAYS = 0
+
+/** Maximum `maxResults` Tavily accepts (search API hard ceiling). */
+const TAVILY_MAX_RESULTS_CEILING = 20
+
+/** Tavily search-depth vocabulary (REST API current enum). */
+export const TAVILY_SEARCH_DEPTHS = ['basic', 'advanced', 'fast', 'ultra-fast'] as const
+export type TavilySearchDepth = typeof TAVILY_SEARCH_DEPTHS[number]
+
+/** Tavily topic vocabulary (REST API current enum). */
+export const TAVILY_TOPICS = ['general', 'news', 'finance'] as const
+export type TavilyTopic = typeof TAVILY_TOPICS[number]
+
+/** Tavily `time_range` vocabulary (short and long forms). */
+export const TAVILY_TIME_RANGES = ['day', 'week', 'month', 'year', 'd', 'w', 'm', 'y'] as const
+export type TavilyTimeRange = typeof TAVILY_TIME_RANGES[number]
+
+/** Attribution header sent on every request (version derived from the manifest). */
+const USER_AGENT = `deepseek-harness-tavily/${packageJson.version}`
 
 /** Environment variable naming this provider's API key. */
 export const TAVILY_API_KEY_ENV = 'TAVILY_API_KEY'
@@ -72,63 +91,81 @@ export const TAVILY_API_KEY_ENV = 'TAVILY_API_KEY'
 /** Settings namespace carrying this provider's endpoint and key reference. */
 export const TAVILY_SETTINGS_NAMESPACE = settingsNamespace(name)
 
+/** `YYYY-MM-DD` shape for Tavily's `start_date` / `end_date`. */
+const YYYY_MM_DD = /^\d{4}-\d{2}-\d{2}$/
+
 /**
  * Plugin config (all optional — `apply` fills env-var and constant defaults).
  * @typedef {Object} Config
  * @property {string} [apiKey] Literal Tavily API key; prefer `apiKeyEnv`.
  * @property {string} [apiKeyEnv] Credential reference; defaults to `TAVILY_API_KEY`.
  * @property {string} [baseURL] Endpoint base; `/search` is appended.
- * @property {'basic'|'advanced'} [searchDepth] Tavily search depth.
- * @property {number} [maxResults] Default result count when a request carries none.
+ * @property {'basic'|'advanced'|'fast'|'ultra-fast'} [searchDepth] Tavily search depth; default `'advanced'`.
+ * @property {number} [maxResults] Default result count when a request carries none (1–20).
  * @property {boolean} [includeAnswer] Ask Tavily to also return a generated answer.
- * @property {'general'|'news'} [topic] Tavily result topic. Defaults to `'news'`
- *   so date-anchored queries return fresh headlines instead of stale archives.
- * @property {number} [days] Limit results to the last N days. Defaults to 7.
- *   Set to a larger value (or remove via `cordis.patch.yml` override) for
- *   historical research.
+ * @property {'general'|'news'|'finance'} [topic] Tavily result category; default `'general'`.
+ * @property {number} [days] Limit results to the last N days (0 disables); legacy form,
+ *   superseded by `timeRange` but still honoured for backward compatibility. Default `0`.
+ * @property {'day'|'week'|'month'|'year'|'d'|'w'|'m'|'y'} [timeRange] Tavily's current
+ *   time-window form; takes precedence over `days` when set.
+ * @property {string} [startDate] Returns only sources after this `YYYY-MM-DD` date.
+ * @property {string} [endDate] Returns only sources before this `YYYY-MM-DD` date.
+ * @property {string[]} [includeDomains] Domains to restrict results INTO.
+ * @property {string[]} [excludeDomains] Domains to exclude from results.
+ * @property {number} [chunksPerSource] Content chunks per source (1–3); default `1`.
  */
 export interface TavilyConfig {
   apiKey?: string
   apiKeyEnv?: string
   baseURL?: string
-  searchDepth?: 'basic' | 'advanced'
+  searchDepth?: TavilySearchDepth
   maxResults?: number
   includeAnswer?: boolean
-  topic?: 'general' | 'news'
+  topic?: TavilyTopic
   days?: number
+  timeRange?: TavilyTimeRange
+  startDate?: string
+  endDate?: string
+  includeDomains?: string[]
+  excludeDomains?: string[]
+  chunksPerSource?: number
 }
 
 export const Config = z.object({
   apiKey: z.string().role('secret'),
   apiKeyEnv: z.string().role('credential-ref'),
   baseURL: z.string(),
-  searchDepth: z.union(['basic', 'advanced']),
-  maxResults: z.number().step(1).min(1),
+  searchDepth: z.union([...TAVILY_SEARCH_DEPTHS]),
+  maxResults: z.number().step(1).min(1).max(TAVILY_MAX_RESULTS_CEILING),
   includeAnswer: z.boolean(),
-  topic: z.union(['general', 'news']),
-  days: z.number().step(1).min(1),
+  topic: z.union([...TAVILY_TOPICS]),
+  days: z.number().step(1).min(0),
+  timeRange: z.union([...TAVILY_TIME_RANGES]),
+  startDate: z.string().pattern(YYYY_MM_DD),
+  endDate: z.string().pattern(YYYY_MM_DD),
+  includeDomains: z.array(z.string()),
+  excludeDomains: z.array(z.string()),
+  chunksPerSource: z.number().step(1).min(1).max(3),
 })
 
 /**
  * Resolved provider options (the plugin's `apply` supplies env-var and constant defaults).
- * @typedef {Object} TavilySearchProviderOptions
- * @property {string} [apiKey] Tavily API key. Empty/absent makes the provider unavailable.
- * @property {string} baseURL Endpoint base; `/search` is appended.
- * @property {'basic'|'advanced'} searchDepth Tavily search depth.
- * @property {number} maxResults Default result count when a request carries none.
- * @property {boolean} includeAnswer Whether Tavily should also return a generated answer.
- * @property {'general'|'news'} topic Tavily result topic. `'news'` biases to fresh news.
- * @property {number} days Limit results to last N days.
- * @property {() => Promise<string|undefined>} [resolveApiKey] Optional async key resolver.
+ * Every field is already defaulted here, so `search()` never re-checks for missing values.
  */
 interface TavilySearchProviderOptions {
   apiKey?: string
   baseURL: string
-  searchDepth: 'basic' | 'advanced'
+  searchDepth: TavilySearchDepth
   maxResults: number
   includeAnswer: boolean
-  topic: 'general' | 'news'
+  topic: TavilyTopic
   days: number
+  timeRange?: TavilyTimeRange
+  startDate?: string
+  endDate?: string
+  includeDomains: string[]
+  excludeDomains: string[]
+  chunksPerSource: number
   resolveApiKey?: () => Promise<string | undefined>
 }
 
@@ -161,6 +198,12 @@ function resolveOptions(ctx: Context, config: TavilyConfig): TavilySearchProvide
     includeAnswer: config.includeAnswer ?? TAVILY_DEFAULT_INCLUDE_ANSWER,
     topic: config.topic ?? TAVILY_DEFAULT_TOPIC,
     days: config.days ?? TAVILY_DEFAULT_DAYS,
+    ...config.timeRange !== undefined ? { timeRange: config.timeRange } : {},
+    ...config.startDate !== undefined ? { startDate: config.startDate } : {},
+    ...config.endDate !== undefined ? { endDate: config.endDate } : {},
+    includeDomains: config.includeDomains ?? [],
+    excludeDomains: config.excludeDomains ?? [],
+    chunksPerSource: config.chunksPerSource ?? TAVILY_DEFAULT_CHUNKS_PER_SOURCE,
   }
 }
 
@@ -253,7 +296,16 @@ export class TavilySearchProvider {
           topic: options.topic,
           search_depth: options.searchDepth,
           ...maxResults !== undefined ? { max_results: maxResults } : {},
-          ...options.days > 0 ? { days: options.days } : {},
+          // Time window: the current `time_range` form wins; the legacy `days`
+          // window (0 = disabled) is a fallback for existing configs.
+          ...options.timeRange !== undefined
+            ? { time_range: options.timeRange }
+            : (options.days > 0 ? { days: options.days } : {}),
+          ...options.startDate !== undefined ? { start_date: options.startDate } : {},
+          ...options.endDate !== undefined ? { end_date: options.endDate } : {},
+          ...options.includeDomains.length > 0 ? { include_domains: options.includeDomains } : {},
+          ...options.excludeDomains.length > 0 ? { exclude_domains: options.excludeDomains } : {},
+          chunks_per_source: options.chunksPerSource,
           include_answer: options.includeAnswer,
           include_raw_content: false,
           include_images: false,
@@ -304,10 +356,13 @@ export class TavilySearchProvider {
 /** Register the Tavily search provider with `ctx.web`. */
 export function apply(ctx: Context, config: TavilyConfig): void {
   let current: TavilyConfig = config
-  // Compose the section's base layer: composition defaults the user has not
-  // overridden, so the card renders pre-populated (maxResults shows 5, not
-  // blank) and a save that leaves the field alone preserves the default.
-  const base: TavilyConfig = { maxResults: TAVILY_DEFAULT_MAX_RESULTS, ...config }
+  // Compose the section's base layer: defaults the user has not overridden,
+  // so the card renders pre-populated and a save that leaves a field alone
+  // preserves the default.
+  const base: TavilyConfig = {
+    maxResults: TAVILY_DEFAULT_MAX_RESULTS,
+    ...config,
+  }
   installSettingsSection(ctx, TAVILY_SETTINGS_NAMESPACE, Config, base, {
     setSource: (source: TavilyConfig) => {
       current = source
@@ -321,8 +376,12 @@ export function apply(ctx: Context, config: TavilyConfig): void {
 
 /** True when `baseURL` parses as an absolute URL (a cheap local config check). */
 function isValidBaseUrl(baseURL: string): boolean {
+  // `new URL` accepts relative strings only with a base argument; called with
+  // one argument it throws for a relative value and returns an absolute URL for
+  // any absolute `http(s)`/`ws(s)`/file input, so the throw is the reject path.
   try {
-    return new URL(baseURL) !== null
+    new URL(baseURL)
+    return true
   } catch {
     return false
   }

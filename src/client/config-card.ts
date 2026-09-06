@@ -29,12 +29,15 @@ import type { Context } from '@deepseek-ai/cordis'
 import { NAMESPACE } from './constants.ts'
 import type { SettingsScopeBinderLike, SettingsScopeLike } from './types.ts'
 
-// ---- Field declaration (mirrors built-in WebSearchCard: 2 settings rows) ----
+// ---- Field declaration ----
+//
+// 基本两个字段（baseURL / maxResults）沿用内置 WebSearchCard 的两行布局；
+// 其余是 Tavily 当前 REST API 的完整可调面，全部走同一个 staged form 模型。
 
 interface FieldSpec {
   /** Settings-section field name. */
   field: string
-  kind: 'text' | 'number'
+  kind: 'text' | 'number' | 'select' | 'textlist'
   /** Visible label (zh; API Key 单独保留英文 'API key')。 */
   label: string
   /** Hint shown under the control (zh)。 */
@@ -43,6 +46,12 @@ interface FieldSpec {
   invalidLabel?: string
   /** Number-field floor. */
   min?: number
+  /** Number-field ceiling. */
+  max?: number
+  /** Options for `select` fields (verbatim wire values). */
+  options?: readonly string[]
+  /** Placeholder for text / textlist inputs. */
+  placeholder?: string
 }
 
 const FIELDS: readonly FieldSpec[] = [
@@ -56,9 +65,76 @@ const FIELDS: readonly FieldSpec[] = [
     field: 'maxResults',
     kind: 'number',
     label: '每次搜索最多结果数',
-    hint: 'Tavily 每次搜索返回的结果数上限,默认 7。',
-    invalidLabel: '必须是 ≥ 1 的整数',
+    hint: 'Tavily 每次搜索返回的结果数上限(1–20),默认 7。',
+    invalidLabel: '必须是 1–20 的整数',
     min: 1,
+    max: 20,
+  },
+  {
+    field: 'searchDepth',
+    kind: 'select',
+    label: '搜索深度',
+    hint: 'basic/fast/ultra-fast 计 1 credit,advanced 计 2 credits。',
+    options: ['basic', 'advanced', 'fast', 'ultra-fast'],
+  },
+  {
+    field: 'topic',
+    kind: 'select',
+    label: '主题类别',
+    hint: 'news 偏向实时新闻;general 为通用搜索;finance 为财经数据。',
+    options: ['general', 'news', 'finance'],
+  },
+  {
+    field: 'timeRange',
+    kind: 'select',
+    label: '时间范围',
+    hint: 'Tavily 较新的时间窗形式(优先于"回溯天数")。',
+    options: ['day', 'week', 'month', 'year', 'd', 'w', 'm', 'y'],
+  },
+  {
+    field: 'days',
+    kind: 'number',
+    label: '回溯天数',
+    hint: '仅 topic=news 时生效;0 表示不限时间窗(旧版字段,建议改用"时间范围")。',
+    invalidLabel: '必须是 ≥ 0 的整数',
+    min: 0,
+  },
+  {
+    field: 'startDate',
+    kind: 'text',
+    label: '起始日期',
+    hint: '仅返回该日期之后发布/更新的结果,格式 YYYY-MM-DD。',
+    placeholder: '2026-01-01',
+  },
+  {
+    field: 'endDate',
+    kind: 'text',
+    label: '截止日期',
+    hint: '仅返回该日期之前发布/更新的结果,格式 YYYY-MM-DD。',
+    placeholder: '2026-12-31',
+  },
+  {
+    field: 'chunksPerSource',
+    kind: 'number',
+    label: '每源内容块数',
+    hint: '每个来源返回的内容片段数(1–3),控制 content 长度。',
+    invalidLabel: '必须是 1–3 的整数',
+    min: 1,
+    max: 3,
+  },
+  {
+    field: 'includeDomains',
+    kind: 'textlist',
+    label: '包含域名',
+    hint: '逗号分隔,结果仅限定这些域名(最多 300 个)。',
+    placeholder: 'example.com, news.site.org',
+  },
+  {
+    field: 'excludeDomains',
+    kind: 'textlist',
+    label: '排除域名',
+    hint: '逗号分隔,从结果中排除这些域名(最多 150 个)。',
+    placeholder: 'spam.example, junk.org',
   },
 ]
 
@@ -350,26 +426,49 @@ class CardForm {
 // ---- Draft coercion & validation ----
 
 function isValidDraft(spec: FieldSpec, text: string): boolean {
+  // Empty always means "inherit the base / unset", so it is a valid draft.
   if (text === '') return true
-  if (spec.kind === 'text') return true
-  if (spec.kind === 'number') {
-    if (!/^-?\d+$/.test(text)) return false
-    const value = Number(text)
-    return Number.isInteger(value) && (spec.min === undefined || value >= spec.min)
+  switch (spec.kind) {
+    case 'text':
+    case 'textlist':
+      return true
+    case 'select':
+      return spec.options === undefined || spec.options.includes(text)
+    case 'number': {
+      if (!/^-?\d+$/.test(text)) return false
+      const value = Number(text)
+      return Number.isInteger(value)
+        && (spec.min === undefined || value >= spec.min)
+        && (spec.max === undefined || value <= spec.max)
+    }
   }
-  return true
 }
 
 function coerceDraft(spec: FieldSpec, text: string): unknown {
   if (text === '') return undefined
-  if (spec.kind === 'number') return Number(text)
-  return text
+  switch (spec.kind) {
+    case 'number':
+      return Number(text)
+    case 'textlist':
+      return text
+        .split(',')
+        .map(part => part.trim())
+        .filter(part => part.length > 0)
+    case 'text':
+    case 'select':
+      return text
+  }
 }
 
 function stringOf(value: unknown): string {
   if (value === undefined || value === null) return ''
   if (typeof value === 'string') return value
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (Array.isArray(value)) {
+    return value
+      .filter((item): item is string => typeof item === 'string')
+      .join(', ')
+  }
   return ''
 }
 
@@ -581,6 +680,38 @@ function ConfigCard({ form }: { form: CardForm | undefined }): React.ReactElemen
 function renderField(form: CardForm, spec: FieldSpec, shell: CardShell): React.ReactElement {
   const state = form.fieldState(spec.field)
   const disabled = !shell.writable
+  const inputId = `dstav-${spec.field}`
+  const inputClass = state.invalid ? 'dstav-input dstav-input-invalid' : 'dstav-input'
+
+  // The editable control differs by kind: text/number/textlist share an
+  // `<input>`, `select` gets a dropdown with an explicit "(未设置)" empty
+  // option, so a cleared override is one click away.
+  const control = spec.kind === 'select'
+    ? React.createElement('select', {
+      id: inputId,
+      className: inputClass,
+      ...(state.invalid ? { 'aria-invalid': true } : {}),
+      value: state.text,
+      disabled,
+      onChange: (event: React.ChangeEvent<HTMLSelectElement>) =>
+        form.edit(spec.field, event.target.value),
+    },
+    React.createElement('option', { value: '' }, '(未设置)'),
+    (spec.options ?? []).map(option =>
+      React.createElement('option', { key: option, value: option }, option)),
+    )
+    : React.createElement('input', {
+      id: inputId,
+      className: inputClass,
+      type: 'text',
+      ...(spec.kind === 'number' ? { inputMode: 'numeric' as const } : {}),
+      ...(state.invalid ? { 'aria-invalid': true } : {}),
+      value: state.text,
+      placeholder: spec.placeholder ?? (spec.kind === 'number' ? '(未设置)' : ''),
+      disabled,
+      onChange: (event: React.ChangeEvent<HTMLInputElement>) =>
+        form.edit(spec.field, event.target.value),
+    })
 
   return React.createElement(
     'div',
@@ -588,7 +719,7 @@ function renderField(form: CardForm, spec: FieldSpec, shell: CardShell): React.R
     React.createElement(
       'div',
       { className: 'dstav-field-head' },
-      React.createElement('label', { className: 'dstav-label', htmlFor: `dstav-${spec.field}` }, spec.label),
+      React.createElement('label', { className: 'dstav-label', htmlFor: inputId }, spec.label),
       state.overridden
         ? React.createElement(
           'span',
@@ -607,18 +738,7 @@ function renderField(form: CardForm, spec: FieldSpec, shell: CardShell): React.R
         )
         : null,
     ),
-    React.createElement('input', {
-      id: `dstav-${spec.field}`,
-      className: state.invalid ? 'dstav-input dstav-input-invalid' : 'dstav-input',
-      type: 'text',
-      ...(spec.kind === 'number' ? { inputMode: 'numeric' as const } : {}),
-      ...(state.invalid ? { 'aria-invalid': true } : {}),
-      value: state.text,
-      placeholder: spec.kind === 'number' ? '(unset)' : '',
-      disabled,
-      onChange: (event: React.ChangeEvent<HTMLInputElement>) =>
-        form.edit(spec.field, event.target.value),
-    }),
+    control,
     React.createElement(
       'p',
       { className: state.invalid ? 'dstav-invalid' : 'dstav-hint' },
