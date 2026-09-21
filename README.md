@@ -70,7 +70,7 @@ Content-Type: application/json
   "search_depth": "advanced",
   "max_results": 7,
   "chunks_per_source": 1,
-  "include_answer": true,
+  "include_answer": false,
   "include_raw_content": false,
   "include_images": false
 }
@@ -80,7 +80,6 @@ Content-Type: application/json
 
 ```jsonc
 {
-  "answer": "To wire web_search to Tavily, register a WebSearchProvider …",
   "results": [
     { "url": "https://deepseek-harness.github.io/...", "title": "web seam reference",      "content": "…" },
     { "url": "https://github.com/.../dsh-web-search-*", "title": "official provider example", "content": "…" },
@@ -89,7 +88,7 @@ Content-Type: application/json
 }
 ```
 
-结果高度相关、无新闻混入,因为默认已是 `topic: 'general'` + `search_depth: 'advanced'` + `chunks_per_source: 1`。要搜**实时新闻**时,在卡片里把「主题类别」切成 `news`、设置「时间范围」,`topic`/`timeRange` 会据此在请求体里带上 `topic: "news"` 和 `time_range`。
+结果高度相关、无新闻混入,且**不含 `answer` 段落**(默认 `include_answer: false`),输出就是干净的 7 条来源。要搜**实时新闻**时,在卡片里把「主题类别」切成 `news`、设置「时间范围」,`topic`/`timeRange` 会据此在请求体里带上 `topic: "news"` 和 `time_range`。
 
 ---
 
@@ -352,7 +351,7 @@ pnpm dsh web
 |---|------|----------|
 | 1 | **Tavily 后台消耗 +1** | 打开 [Tavily Dashboard](https://app.tavily.com/) → Usage,跑一次搜索后看计数 |
 | 2 | **DevTools Network** | 看到 `POST https://api.tavily.com/search`,Authorization 是 `Bearer tvly-...` |
-| 3 | **返回里有 `answer` 段落** | 这是 Tavily `include_answer` 的特性,内置 DeepSeek 搜索不带这种自然语言总结 |
+| 3 | **返回条数 = maxResults** | 默认 `include_answer: false`,输出就是 `Sources:` 列表,条数严格等于配置的 `maxResults` |
 
 ### 数量上限
 
@@ -407,7 +406,8 @@ pnpm dsh web
 | `includeDomains` | string[] | `[]` | 结果限定在这些域名(最多 300)。卡片可写(逗号分隔)。 |
 | `excludeDomains` | string[] | `[]` | 从结果排除这些域名(最多 150)。卡片可写(逗号分隔)。 |
 | `chunksPerSource` | number | `1` | 每个来源返回的内容块数(1–3,每块 ≤500 字符)。默认 `1` 让 snippet 更短更聚焦。卡片可写。 |
-| `includeAnswer` | boolean | `true` | 让 Tavily 顺便返回一段自然语言 `answer`,模型能直接引用。**卡片未暴露,改用 `cordis.patch.yml`** |
+| `includeAnswer` | boolean | `false` | 让 Tavily 顺便返回一段自然语言 `answer`。**默认关**:那段 LLM 总结读起来像额外一条结果,易造成"8 条 vs 7 条"的混淆。要开启就在 `cordis.patch.yml` 写 `includeAnswer: true`。卡片未暴露。 |
+| `useMcp` | boolean | `false` | **MCP 让位模式**。开启后 `web_search` 不再执行 REST 搜索(不消耗配额),而是返回引导消息让模型改用 `mcp__tavily__tavily_search` 等工具——需先在 `cordis.patch.yml` 配置 `@deepseek-ai/dsh-mcp-client` + Tavily MCP 服务器(卡片开关会提供配置片段)。卡片可写(开关)。 |
 
 ### 三种注入方式(从高到低优先级)
 
@@ -433,7 +433,7 @@ pnpm dsh web
     includeDomains: [news.site.org, example.com]
     excludeDomains: [spam.example]
     chunksPerSource: 2                          # 1–3
-    includeAnswer: true
+    includeAnswer: false                         # 默认关;要自然语言总结改 true
 ```
 
 ---
@@ -468,7 +468,7 @@ pnpm dsh web
 #      "search_depth": "advanced",
 #      "max_results": 7,
 #      "chunks_per_source": 1,
-#      "include_answer": true,
+#      "include_answer": false,
 #      "include_raw_content": false,
 #      "include_images": false
 #    }
@@ -563,7 +563,7 @@ export function apply(ctx: Context, config: TavilyConfig): void {
      "search_depth": options.searchDepth, // 'advanced'
      "max_results": maxResults,          // 7
      "chunks_per_source": options.chunksPerSource, // 1
-     "include_answer": options.includeAnswer, // true
+     "include_answer": options.includeAnswer, // false
      ...
    }
    ```
@@ -619,7 +619,7 @@ A:Tavily 有三件事是 DeepSeek 自带搜索做不到的:
 A:可以,照着 `src/index.ts` 写一个新的 `XxxSearchProvider` 注册到 `ctx.web.registerSearchProvider(...)` 即可。`id` 不要和 `tavily` 撞就行。本仓库专注于 Tavily,不做多后端。
 
 ### Q:卡片和 DSH 内置的 WebSearchCard 长一样吗?
-A:基本字段(API key + endpoint + 结果上限)与内置卡片一致;在此之上新增了下拉/输入项覆盖 Tavily 的完整可调面:`searchDepth` / `topic` / `timeRange` / `days` / `startDate` / `endDate` / `chunksPerSource` / `includeDomains` / `excludeDomains`。唯一未暴露的是 `includeAnswer`(保持 YAML-only),要关掉自然语言总结就在 `cordis.patch.yml` 写 `includeAnswer: false`。
+A:基本字段(API key + endpoint + 结果上限)与内置卡片一致;在此之上新增了下拉/输入项覆盖 Tavily 的完整可调面:`searchDepth` / `topic` / `timeRange` / `days` / `startDate` / `endDate` / `chunksPerSource` / `includeDomains` / `excludeDomains`。唯一未暴露的是 `includeAnswer`(保持 YAML-only),要开启自然语言总结就在 `cordis.patch.yml` 写 `includeAnswer: true`。
 
 ### Q:DSH 升级后卡片会不会消失?
 A:不会。本插件的所有 UI 代码都自己带,不依赖 DSH `ui-settings-plugins` 包内部的组件。DSH 升级只要不破坏 `@deepseek-ai/cordis` 的 `ctx.slots` 接口,卡片就还在。
@@ -965,7 +965,7 @@ pnpm add --save github:<your-org>/dsh-tavily-search-plugin
 ## 已知限制 / Known limitations
 
 - **`maxResults` 是插件层硬封顶**:即便 `web_search` 工具本身请求了更多结果,Tavily 也不会收到超过 `options.maxResults` 的 `max_results`。这是为了让免费额度可控;如果你想突破这个上限,直接修改 `src/index.ts` 的 `Math.min(...)` 行。
-- **`includeAnswer` 不通过 UI 卡片暴露**:它仍是 host 半的合法 schema 字段(写进请求体的 `include_answer`),只是 UI 不渲染。要关掉自然语言总结,在 `cordis.patch.yml` 里写 `includeAnswer: false`。
+- **`includeAnswer` 不通过 UI 卡片暴露**:它仍是 host 半的合法 schema 字段(写进请求体的 `include_answer`),只是 UI 不渲染。要开启自然语言总结,在 `cordis.patch.yml` 里写 `includeAnswer: true`。
 - **`include_images` / `include_raw_content` 写死 `false`**:如需图片或原始 HTML,自行放开 `search()` 里的对应字段(同时考虑上下文窗口)。
 - **没有重试逻辑**:HTTP 5xx 直接抛 `WEB_PROVIDER_ERROR`。DSH 上层会决定是否重试。
 - **`cordis.yml` 是冷启动配置** —— HMR 不适用,改完必须重启。

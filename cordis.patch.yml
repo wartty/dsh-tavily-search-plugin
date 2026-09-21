@@ -13,14 +13,21 @@
 # on every search, so a restart is needed for host changes to take effect.
 #
 # Optional configuration keys for `id: web-search-tavily`:
-#   apiKey:         literal Tavily API key (avoid committing)
-#   apiKeyEnv:      credential reference name (default TAVILY_API_KEY)
-#   baseURL:        endpoint base (default https://api.tavily.com)
-#   topic:          "general" | "news" (default news; biases toward fresh sources)
-#   days:           positive integer; limit results to last N days (default 7; 0 disables)
-#   searchDepth:    "basic" | "advanced" (default basic)
-#   maxResults:     positive integer (default 7)
-#   includeAnswer:  true | false (default true)
+#   apiKey:          literal Tavily API key (avoid committing)
+#   apiKeyEnv:       credential reference name (default TAVILY_API_KEY)
+#   baseURL:         endpoint base (default https://api.tavily.com)
+#   searchDepth:     "basic" | "advanced" | "fast" | "ultra-fast" (default advanced)
+#   maxResults:      integer 1-20 (default 7)
+#   includeAnswer:   true | false (default false; the LLM answer reads like a stray result)
+#   topic:           "general" | "news" | "finance" (default general)
+#   days:            non-negative integer; limit to last N days (default 0 = no window; news topic only)
+#   timeRange:       "day" | "week" | "month" | "year" | "d" | "w" | "m" | "y" (wins over days)
+#   startDate:       "YYYY-MM-DD" (sources after this date)
+#   endDate:         "YYYY-MM-DD" (sources before this date)
+#   includeDomains:  domain list — restrict results INTO (max 300)
+#   excludeDomains:  domain list — exclude from results (max 150)
+#   chunksPerSource: integer 1-3 (default 1; short focused snippets)
+#   useMcp:          true | false (default false; web_search hands off to mcp__tavily__* tools)
 
 - insert:
     - id: web-search-tavily

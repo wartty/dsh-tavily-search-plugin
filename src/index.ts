@@ -23,7 +23,6 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import packageJson from '../package.json' with { type: 'json' }
 
 /** Cordis plugin name used by loader diagnostics and the settings namespace. */
@@ -43,8 +42,11 @@ export const TAVILY_DEFAULT_BASE_URL = 'https://api.tavily.com'
  * the cheaper `basic`/`fast`/`ultra-fast` (1 credit) are one card toggle away. */
 export const TAVILY_DEFAULT_SEARCH_DEPTH = 'advanced' as const
 
-/** Default for asking Tavily to also generate a natural-language answer. */
-export const TAVILY_DEFAULT_INCLUDE_ANSWER = true
+/** Default for asking Tavily to also generate a natural-language answer.
+ * `false`: the LLM answer reads like a stray extra "result" and was a top
+ * source of perceived noise — sources-only by default; enable per-deployment
+ * via `cordis.patch.yml` when the summary is genuinely wanted. */
+export const TAVILY_DEFAULT_INCLUDE_ANSWER = false
 
 /** Default number of results Tavily returns when neither the caller nor the section names one. */
 export const TAVILY_DEFAULT_MAX_RESULTS = 7
@@ -89,7 +91,10 @@ const USER_AGENT = `deepseek-harness-tavily/${packageJson.version}`
 export const TAVILY_API_KEY_ENV = 'TAVILY_API_KEY'
 
 /** Settings namespace carrying this provider's endpoint and key reference. */
-export const TAVILY_SETTINGS_NAMESPACE = settingsNamespace(name)
+/** Settings namespace carrying this provider's endpoint and key reference.
+ * DSH ≥ 0.1.5 dropped the `settingsNamespace()` brand helper; the namespace is
+ * a plain lowercase hyphenated string, validated by the provider at runtime. */
+export const TAVILY_SETTINGS_NAMESPACE: 'web-search-tavily' = 'web-search-tavily'
 
 /** `YYYY-MM-DD` shape for Tavily's `start_date` / `end_date`. */
 const YYYY_MM_DD = /^\d{4}-\d{2}-\d{2}$/
@@ -113,6 +118,9 @@ const YYYY_MM_DD = /^\d{4}-\d{2}-\d{2}$/
  * @property {string[]} [includeDomains] Domains to restrict results INTO.
  * @property {string[]} [excludeDomains] Domains to exclude from results.
  * @property {number} [chunksPerSource] Content chunks per source (1–3); default `1`.
+ * @property {boolean} [useMcp] MCP hand-off mode; default `false`. When `true`,
+ *   `web_search` returns a pointer to the `mcp__tavily__*` tools instead of
+ *   searching, so the model routes search through a configured Tavily MCP server.
  */
 export interface TavilyConfig {
   apiKey?: string
@@ -129,6 +137,7 @@ export interface TavilyConfig {
   includeDomains?: string[]
   excludeDomains?: string[]
   chunksPerSource?: number
+  useMcp?: boolean
 }
 
 export const Config = z.object({
@@ -146,6 +155,7 @@ export const Config = z.object({
   includeDomains: z.array(z.string()),
   excludeDomains: z.array(z.string()),
   chunksPerSource: z.number().step(1).min(1).max(3),
+  useMcp: z.boolean(),
 })
 
 /**
@@ -166,6 +176,7 @@ interface TavilySearchProviderOptions {
   includeDomains: string[]
   excludeDomains: string[]
   chunksPerSource: number
+  useMcp: boolean
   resolveApiKey?: () => Promise<string | undefined>
 }
 
@@ -204,6 +215,7 @@ function resolveOptions(ctx: Context, config: TavilyConfig): TavilySearchProvide
     includeDomains: config.includeDomains ?? [],
     excludeDomains: config.excludeDomains ?? [],
     chunksPerSource: config.chunksPerSource ?? TAVILY_DEFAULT_CHUNKS_PER_SOURCE,
+    useMcp: config.useMcp ?? false,
   }
 }
 
@@ -254,10 +266,14 @@ export class TavilySearchProvider {
   }
 
   available(): boolean {
+    const options = this.resolveOptions()
+    // MCP hand-off mode never performs a REST search, so the key/baseURL
+    // preconditions are irrelevant — staying available keeps `web_search`
+    // answering with the pointer message instead of a provider error.
+    if (options.useMcp) return true
     // A key may come from the environment/credential resolver rather than a
     // literal, so a present resolver makes the provider available exactly as
     // the in-box DeepSeek provider does.
-    const options = this.resolveOptions()
     return ((options.apiKey?.length ?? 0) > 0 || options.resolveApiKey !== undefined)
       && isValidBaseUrl(options.baseURL)
       && isPositiveInteger(options.maxResults)
@@ -270,6 +286,19 @@ export class TavilySearchProvider {
     // One snapshot for the whole operation, so a settings write landing mid-call
     // cannot mix the key of one section with the endpoint of another.
     const options = this.resolveOptions()
+    // MCP hand-off mode: the model should route search through the configured
+    // Tavily MCP server's tools instead of this REST provider. `web_search`
+    // itself cannot be unmounted from the preset layer, so the call returns a
+    // pointer message — no Tavily credits are consumed.
+    if (options.useMcp) {
+      return {
+        content: 'web_search 已处于 Tavily MCP 模式（useMcp: true），本次调用不执行搜索，也不消耗 Tavily 配额。'
+          + '请改用 mcp__tavily__tavily_search 工具完成网页搜索；'
+          + '页面提取、站点爬取与站点地图分别对应 mcp__tavily__tavily_extract / mcp__tavily__tavily_crawl / mcp__tavily__tavily_map。',
+        sources: [],
+        truncated: false,
+      }
+    }
     // The configured default is the hard ceiling: a request may ask for fewer
     // results, but never more — this keeps Tavily usage within the free tier
     // regardless of the host tool layer's own source cap.
@@ -342,11 +371,13 @@ export class TavilySearchProvider {
     }
 
     const sources = (payload.results ?? []).map(mapTavilyResult)
-    const content = payload.answer != null && payload.answer.length > 0
-      ? payload.answer
+    // Prefix the answer so it reads as an isolated summary rather than a stray
+    // eighth "result" beside the `Sources:` list the web tool renders next.
+    const answer = payload.answer != null && payload.answer.length > 0
+      ? `**Answer:** ${payload.answer}`
       : undefined
     return {
-      ...content !== undefined ? { content } : {},
+      ...answer !== undefined ? { content: answer } : {},
       sources,
       truncated: false,
     }
@@ -355,23 +386,39 @@ export class TavilySearchProvider {
 
 /** Register the Tavily search provider with `ctx.web`. */
 export function apply(ctx: Context, config: TavilyConfig): void {
-  let current: TavilyConfig = config
-  // Compose the section's base layer: defaults the user has not overridden,
-  // so the card renders pre-populated and a save that leaves a field alone
-  // preserves the default.
+  // DSH ≥ 0.1.5 hands the section's source as a THUNK (`() => T`): keep a level
+  // of indirection and re-read it per search, so a committed settings change
+  // takes effect without re-registering the provider.
+  let current: () => TavilyConfig = () => config
+  // Compose the section's base layer from every constant default, so the card
+  // renders pre-populated with exactly the values `resolveOptions` would fall
+  // back to — a card showing "(unset)" next to a search that actually used
+  // `advanced` would be a silent display/behavior mismatch.
   const base: TavilyConfig = {
+    searchDepth: TAVILY_DEFAULT_SEARCH_DEPTH,
     maxResults: TAVILY_DEFAULT_MAX_RESULTS,
+    includeAnswer: TAVILY_DEFAULT_INCLUDE_ANSWER,
+    topic: TAVILY_DEFAULT_TOPIC,
+    days: TAVILY_DEFAULT_DAYS,
+    chunksPerSource: TAVILY_DEFAULT_CHUNKS_PER_SOURCE,
+    useMcp: false,
     ...config,
   }
-  installSettingsSection(ctx, TAVILY_SETTINGS_NAMESPACE, Config, base, {
-    setSource: (source: TavilyConfig) => {
-      current = source
-    },
-    // The registration carries no resolved value: the provider projects the
-    // section per search, so a committed change needs no re-registration.
-    onChange: () => {},
+  // DSH ≥ 0.1.5 dropped the free `installSettingsSection` helper: the section
+  // now installs through the `settings` service, injected at call level so the
+  // provider still registers (falling back to the composition entry) when the
+  // settings service is absent.
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.settings.installSection(ctx, TAVILY_SETTINGS_NAMESPACE, Config, base, {
+      setSource: (source: () => TavilyConfig) => {
+        current = source
+      },
+      // The registration carries no resolved value: the provider projects the
+      // section per search, so a committed change needs no re-registration.
+      onChange: () => {},
+    })
   })
-  ctx.web.registerSearchProvider(new TavilySearchProvider(() => resolveOptions(ctx, current)))
+  ctx.web.registerSearchProvider(new TavilySearchProvider(() => resolveOptions(ctx, current())))
 }
 
 /** True when `baseURL` parses as an absolute URL (a cheap local config check). */

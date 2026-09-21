@@ -207,6 +207,58 @@ export function injectStyles(): void {
   margin: 0;
   font-size: 12px; line-height: 1.6;
 }
+.dstav-checkbox {
+  width: 16px; height: 16px;
+  accent-color: var(--dsw-alias-brand-primary);
+  cursor: pointer;
+}
+.dstav-checkbox:disabled { cursor: default; opacity: .5; }
+.dstav-mcp-panel {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
+}
+.dstav-mcp-title {
+  color: var(--dsw-alias-label-primary);
+  margin: 0;
+  font-size: 12px; font-weight: 500; line-height: 1.5;
+}
+.dstav-mcp-snippet {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 6px;
+  color: var(--dsw-alias-label-secondary);
+  font-family: 'SF Mono', 'JetBrains Mono', 'Fira Code', Consolas, 'Liberation Mono',
+    Menlo, Courier, 'PingFang SC', 'Microsoft YaHei', monospace;
+  font-size: 11px; line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+}
+.dstav-mcp-actions {
+  display: flex; gap: 8px; align-items: center;
+}
+.dstav-mcp-yes, .dstav-mcp-no, .dstav-mcp-copy, .dstav-mcp-back {
+  padding: 6px 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px; font-weight: 500; line-height: 1.5;
+  cursor: pointer;
+}
+.dstav-mcp-yes:hover, .dstav-mcp-no:hover, .dstav-mcp-copy:hover, .dstav-mcp-back:hover {
+  border-color: var(--dsw-alias-brand-primary);
+}
+.dstav-mcp-note {
+  color: var(--dsw-alias-label-tertiary);
+  margin: 0;
+  font-size: 11px; line-height: 1.5;
+}
 `
   document.head.appendChild(tag)
 }

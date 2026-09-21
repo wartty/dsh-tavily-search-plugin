@@ -37,7 +37,7 @@ import type { SettingsScopeBinderLike, SettingsScopeLike } from './types.ts'
 interface FieldSpec {
   /** Settings-section field name. */
   field: string
-  kind: 'text' | 'number' | 'select' | 'textlist'
+  kind: 'text' | 'number' | 'select' | 'textlist' | 'boolean'
   /** Visible label (zh; API Key 单独保留英文 'API key')。 */
   label: string
   /** Hint shown under the control (zh)。 */
@@ -135,6 +135,12 @@ const FIELDS: readonly FieldSpec[] = [
     label: '排除域名',
     hint: '逗号分隔,从结果中排除这些域名(最多 150 个)。',
     placeholder: 'spam.example, junk.org',
+  },
+  {
+    field: 'useMcp',
+    kind: 'boolean',
+    label: '使用 Tavily MCP 服务器',
+    hint: '开启后 web_search 让位给 mcp__tavily__* 系列工具(需先在 cordis.patch.yml 配置 MCP 服务器)。',
   },
 ]
 
@@ -265,6 +271,12 @@ class CardForm {
       overridden: userText !== undefined,
       invalid: !isValidDraft(this.fieldSpec(field), draft),
     }
+  }
+
+  /** The staged (unsaved) draft for one field; `undefined` when nothing is staged. */
+  stagedValue(field: string): string | undefined {
+    const staged = this.staged.get(field)
+    return staged?.kind === 'edit' ? staged.text : undefined
   }
 
   /** Stage a text edit for one field. */
@@ -431,6 +443,7 @@ function isValidDraft(spec: FieldSpec, text: string): boolean {
   switch (spec.kind) {
     case 'text':
     case 'textlist':
+    case 'boolean':
       return true
     case 'select':
       return spec.options === undefined || spec.options.includes(text)
@@ -449,6 +462,8 @@ function coerceDraft(spec: FieldSpec, text: string): unknown {
   switch (spec.kind) {
     case 'number':
       return Number(text)
+    case 'boolean':
+      return text === 'true'
     case 'textlist':
       return text
         .split(',')
@@ -528,6 +543,9 @@ export function registerConfigCard(ctx: Context): void {
 function ConfigCard({ form }: { form: CardForm | undefined }): React.ReactElement {
   const [, forceRender] = React.useReducer((count: number) => count + 1, 0)
   const [open, setOpen] = React.useState(false)
+  // MCP hand-off confirmation flow: 'asking' when the user flips useMcp on,
+  // 'guide' after they answer "not configured yet" (shows the patch snippet).
+  const [mcpConfirm, setMcpConfirm] = React.useState<'idle' | 'asking' | 'guide'>('idle')
   React.useEffect(() => (form === undefined ? undefined : form.subscribe(forceRender)), [form])
 
   if (form === undefined) {
@@ -638,7 +656,17 @@ function ConfigCard({ form }: { form: CardForm | undefined }): React.ReactElemen
         ),
 
         // --- Settings fields (mirrors built-in WebSearchCard's 2-row layout) ---
-        FIELDS.map(spec => renderField(form, spec, shell)),
+        FIELDS.map(spec => renderField(
+          form,
+          spec,
+          shell,
+          spec.field === 'useMcp'
+            ? (checked) => setMcpConfirm(checked ? 'asking' : 'idle')
+            : undefined,
+        )),
+
+        // --- MCP hand-off confirmation / patch-snippet guide ---
+        mcpPanel(mcpConfirm, setMcpConfirm, form),
 
         // --- Footer ---
         React.createElement(
@@ -677,7 +705,12 @@ function ConfigCard({ form }: { form: CardForm | undefined }): React.ReactElemen
   )
 }
 
-function renderField(form: CardForm, spec: FieldSpec, shell: CardShell): React.ReactElement {
+function renderField(
+  form: CardForm,
+  spec: FieldSpec,
+  shell: CardShell,
+  onBooleanToggle?: (checked: boolean) => void,
+): React.ReactElement {
   const state = form.fieldState(spec.field)
   const disabled = !shell.writable
   const inputId = `dstav-${spec.field}`
@@ -685,7 +718,7 @@ function renderField(form: CardForm, spec: FieldSpec, shell: CardShell): React.R
 
   // The editable control differs by kind: text/number/textlist share an
   // `<input>`, `select` gets a dropdown with an explicit "(未设置)" empty
-  // option, so a cleared override is one click away.
+  // option, and `boolean` gets a checkbox whose draft is the string 'true'/'false'.
   const control = spec.kind === 'select'
     ? React.createElement('select', {
       id: inputId,
@@ -700,6 +733,18 @@ function renderField(form: CardForm, spec: FieldSpec, shell: CardShell): React.R
     (spec.options ?? []).map(option =>
       React.createElement('option', { key: option, value: option }, option)),
     )
+    : spec.kind === 'boolean'
+    ? React.createElement('input', {
+      id: inputId,
+      className: 'dstav-checkbox',
+      type: 'checkbox',
+      checked: state.text === 'true',
+      disabled,
+      onChange: (event: React.ChangeEvent<HTMLInputElement>) => {
+        form.edit(spec.field, event.target.checked ? 'true' : 'false')
+        onBooleanToggle?.(event.target.checked)
+      },
+    })
     : React.createElement('input', {
       id: inputId,
       className: inputClass,
@@ -743,6 +788,98 @@ function renderField(form: CardForm, spec: FieldSpec, shell: CardShell): React.R
       'p',
       { className: state.invalid ? 'dstav-invalid' : 'dstav-hint' },
       state.invalid ? spec.invalidLabel ?? 'Invalid value' : spec.hint,
+    ),
+  )
+}
+
+/** The patch snippet the user pastes into their profile's cordis.patch.yml to
+ * mount the Tavily remote MCP server. The URL carries a `<…>` placeholder —
+ * a `!!js process.env.X` expression reads the shell env DSH was launched from,
+ * which does NOT include `~/.dsh/.credentials.yaml`, so a static literal the
+ * user fills in is the reliable form. */
+const MCP_PATCH_SNIPPET = `- insert:
+    - id: mcp-tavily
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        transport: streamable-http
+        serverName: tavily
+        url: https://mcp.tavily.com/mcp/?tavilyApiKey=<把你的 key 粘到这里 — 见 ~/.dsh/.credentials.yaml>
+        toolCallTimeoutMs: 60000
+        failOnStartupError: false`
+
+/**
+ * The MCP hand-off confirmation panel, rendered under the `useMcp` toggle.
+ *
+ * Three states:
+ * - 'asking': the user flipped the toggle on — ask whether the Tavily MCP
+ *   server is already configured.
+ * - 'guide': the user answered "not configured yet" — show the full patch
+ *   snippet with a copy button and the paste-and-restart instructions.
+ * - answered 'yes' (panel hidden): the normal save flow persists `useMcp: true`.
+ */
+function mcpPanel(
+  state: 'idle' | 'asking' | 'guide',
+  set: (next: 'idle' | 'asking' | 'guide') => void,
+  form: CardForm,
+): React.ReactElement | null {
+  if (state === 'idle') return null
+  // The panel only makes sense while a `useMcp: true` draft is staged; a
+  // discard (or flipping the toggle back) collapses it.
+  if (form.stagedValue('useMcp') !== 'true') return null
+
+  if (state === 'asking') {
+    return React.createElement(
+      'div',
+      { className: 'dstav-mcp-panel', role: 'status' },
+      React.createElement('p', { className: 'dstav-mcp-title' }, '是否已经配置了 Tavily 的 MCP 服务器？'),
+      React.createElement(
+        'div',
+        { className: 'dstav-mcp-actions' },
+        React.createElement(
+          'button',
+          { type: 'button', className: 'dstav-mcp-yes', onClick: () => set('idle') },
+          '是，已配置',
+        ),
+        React.createElement(
+          'button',
+          { type: 'button', className: 'dstav-mcp-no', onClick: () => set('guide') },
+          '否，未配置',
+        ),
+      ),
+    )
+  }
+
+  return React.createElement(
+    'div',
+    { className: 'dstav-mcp-panel' },
+    React.createElement(
+      'p',
+      { className: 'dstav-mcp-title' },
+      '尚未配置 Tavily MCP 服务器。将以下配置粘贴到 ~/.dsh/profiles/web/cordis.patch.yml，然后重启 DSH:',
+    ),
+    React.createElement('pre', { className: 'dstav-mcp-snippet' }, MCP_PATCH_SNIPPET),
+    React.createElement(
+      'div',
+      { className: 'dstav-mcp-actions' },
+      React.createElement(
+        'button',
+        {
+          type: 'button',
+          className: 'dstav-mcp-copy',
+          onClick: () => { void navigator.clipboard?.writeText(MCP_PATCH_SNIPPET) },
+        },
+        '复制配置',
+      ),
+      React.createElement(
+        'button',
+        { type: 'button', className: 'dstav-mcp-back', onClick: () => set('asking') },
+        '返回',
+      ),
+    ),
+    React.createElement(
+      'p',
+      { className: 'dstav-mcp-note' },
+      '粘贴并重启后,模型会看到 mcp__tavily__tavily_search / tavily_extract / tavily_crawl / tavily_map 工具;本开关保存后,web_search 将让位给 MCP 搜索且不消耗 REST 配额。',
     ),
   )
 }
