@@ -1,38 +1,28 @@
 /**
  * One-shot CSS injection for the client half.
  *
- * Every `dstav-*` class lives in a single `<style data-plugin data-plugin-css>`
- * tag; client-modules reads the `data-plugin` attribute to attribute the
- * stylesheet to this plugin, so updates to the plugin version replace it.
+ * Every `dstav-*` class lives in one `<style data-plugin data-plugin-css>` tag.
+ * The tag is claimed by MODULE id (the package name in the tsdown client
+ * banner), not by the settings namespace: client-modules attributes a stylesheet
+ * by `data-plugin`, and the HMR unloader removes this bundle's tags by the same
+ * id — a namespace-shaped value would be neither claimable nor removable, so
+ * every rebuild would stack another copy of these rules.
  *
  * Colours go through theme variables (`--dsw-alias-*`, defined in
- * `packages/client/ui-theme/src/styles/design-platform.css`) so the card
- * follows the user's light/dark theme automatically.
+ * `packages/client/ui-theme/src/styles/design-platform.css`) so the card follows
+ * the user's light/dark theme automatically. Token names are worth verifying
+ * against that file: an undefined variable makes its declaration silently inert.
  * @module dsh-tavily-search-plugin/client/styles
  */
 
-import { NAMESPACE } from './constants.ts'
+/** Module id this bundle registers under (`window.__ModuleLoader__.load`). */
+const CLIENT_MODULE_ID = 'dsh-tavily-search-plugin'
 
-declare const document: {
-  createElement(tag: 'style'): {
-    dataset: Record<string, string>
-    textContent: string
-  }
-  head: {
-    appendChild(node: { dataset: Record<string, string>; textContent: string }): void
-  }
-}
+/** Stylesheet tag id, mirroring how the built-in client bundles mark their own. */
+const STYLE_TAG_ID = `${CLIENT_MODULE_ID}/card.css`
 
-let stylesInjected = false
-
-/** Inject the card's stylesheet into the document head; no-op after the first call. */
-export function injectStyles(): void {
-  if (stylesInjected || typeof document === 'undefined') return
-  stylesInjected = true
-  const tag = document.createElement('style')
-  tag.dataset.plugin = NAMESPACE
-  tag.dataset.pluginCss = `${NAMESPACE}/card`
-  tag.textContent = `
+/** The card's stylesheet. */
+const CARD_CSS = `
 .dstav-card {
   list-style: none;
   border: 1px solid var(--dsw-alias-border-l2);
@@ -62,14 +52,6 @@ export function injectStyles(): void {
   color: var(--dsw-alias-label-tertiary);
   font-size: 13px; line-height: 1.5;
 }
-.dstav-pending {
-  white-space: nowrap;
-  background: var(--dsw-alias-bg-module-platform);
-  color: var(--dsw-alias-label-secondary);
-  border-radius: 999px;
-  padding: 1px 8px;
-  font-size: 11px; font-weight: 500; line-height: 17px;
-}
 .dstav-chevron {
   color: var(--dsw-alias-label-secondary);
   transition: transform .16s;
@@ -91,7 +73,7 @@ export function injectStyles(): void {
   padding-top: 12px;
 }
 .dstav-failed {
-  color: var(--dsw-alias-label-error);
+  color: var(--dsw-alias-state-error-primary);
   margin: 0; flex: 1;
   font-size: 12px; line-height: 1.5;
 }
@@ -181,10 +163,10 @@ export function injectStyles(): void {
   cursor: default;
 }
 .dstav-input-invalid {
-  border-color: var(--dsw-alias-label-error);
+  border-color: var(--dsw-alias-state-error-primary);
 }
 .dstav-invalid {
-  color: var(--dsw-alias-label-error);
+  color: var(--dsw-alias-state-error-primary);
   margin: 0;
   font-size: 12px; line-height: 1.5;
 }
@@ -260,5 +242,20 @@ export function injectStyles(): void {
   font-size: 11px; line-height: 1.5;
 }
 `
+
+/**
+ * Inject the card's stylesheet once per document.
+ *
+ * The guard is a DOM lookup rather than a module-level boolean: a re-materialized
+ * bundle starts with fresh module state, so a boolean would let every client
+ * rebuild append another copy.
+ */
+export function injectStyles(): void {
+  if (typeof document === 'undefined') return
+  if (document.querySelector(`style[data-plugin-css="${STYLE_TAG_ID}"]`) !== null) return
+  const tag = document.createElement('style')
+  tag.dataset.plugin = CLIENT_MODULE_ID
+  tag.dataset.pluginCss = STYLE_TAG_ID
+  tag.textContent = CARD_CSS
   document.head.appendChild(tag)
 }

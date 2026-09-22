@@ -184,7 +184,7 @@ DSH 启动时 `prepareProfile(...)` 会按顺序合入 `bundles` 数组里每个
    ```bash
    node apps/cli/lib/bin.js --profile web --dump-default-config
    ```
-   输出里应看到 `# == dsh-tavily-search-plugin` 注释段,以及 `- id: web-search-tavily / name: dsh-tavily-search-plugin` 与 `- id: web config.searchProvider: tavily` 两段 patch 已合入。
+   输出里应看到 `# == dsh-tavily-search-plugin` 注释段,以及 `- id: web-search-tavily / name: dsh-tavily-search-plugin` 与 `- id: web config:`(`searchProvider: tavily` + 重述的 `fetchProvider: http`)两段 patch 已合入。
 
 ### D. 配置 API Key + 重启
 
@@ -212,6 +212,7 @@ cat >> ~/.dsh/profiles/web/cordis.patch.yml <<'YAML'
 - id: web
   config:
     searchProvider: tavily
+    fetchProvider: http
 YAML
 ```
 
@@ -297,11 +298,13 @@ DSH ≥ 0.1.1 的现代 loader 会自动把 `cordis.patch.yml` 合入 profile,�
 - id: web
   config:
     searchProvider: tavily
+    fetchProvider: http
 ```
 
 **这两条必须都有**:
 - `- insert:` 把插件挂上 cordis loader(没有这一条,host 半根本不会执行)。
 - `- id: web config.searchProvider: tavily` 把 web seam 切到本 provider(没有这一条,DSH 会抛 `WEB_PROVIDER_AMBIGUOUS`,因为它不做静默回退)。
+- `fetchProvider: http` **必须原样重述**:patch 层替换目标行的**整个** `config`,不做按键深合并。`@deepseek-ai/dsh-base` 里这一行是 `searchProvider: deepseek-official` + `fetchProvider: http`,只写 `searchProvider` 会把 `fetchProvider` 抹掉,`web_fetch` 就变成"未配置 provider"状态(靠"恰好只有一个可用 fetch 后端"的兜底规则侥幸工作,一旦出现第二个后端就抛 `WEB_PROVIDER_AMBIGUOUS`)。
 
 ### 2. 提供 Tavily API Key / Supply the Tavily API Key
 
@@ -406,6 +409,7 @@ pnpm dsh web
 | `includeDomains` | string[] | `[]` | 结果限定在这些域名(最多 300)。卡片可写(逗号分隔)。 |
 | `excludeDomains` | string[] | `[]` | 从结果排除这些域名(最多 150)。卡片可写(逗号分隔)。 |
 | `chunksPerSource` | number | `1` | 每个来源返回的内容块数(1–3,每块 ≤500 字符)。默认 `1` 让 snippet 更短更聚焦。卡片可写。 |
+| `snippetMaxChars` | number | `600` | 单个来源 snippet 的字符上限(含末尾省略号,最小 16)。这是唯一防止整页摘录污染模型上下文的闸门,上下文预算不同就调它。卡片可写。 |
 | `includeAnswer` | boolean | `false` | 让 Tavily 顺便返回一段自然语言 `answer`。**默认关**:那段 LLM 总结读起来像额外一条结果,易造成"8 条 vs 7 条"的混淆。要开启就在 `cordis.patch.yml` 写 `includeAnswer: true`。卡片未暴露。 |
 | `useMcp` | boolean | `false` | **MCP 让位模式**。开启后 `web_search` 不再执行 REST 搜索(不消耗配额),而是返回引导消息让模型改用 `mcp__tavily__tavily_search` 等工具——需先在 `cordis.patch.yml` 配置 `@deepseek-ai/dsh-mcp-client` + Tavily MCP 服务器(卡片开关会提供配置片段)。卡片可写(开关)。 |
 
@@ -525,26 +529,38 @@ DSH 0.1.0-rc.5+ 的插件系统允许一个 npm 包同时承担两种角色:
 | **Host 半** | `lib/index.js` 导出 `apply(ctx, config)` | DSH 服务端冷启动,`cordis loader` 加载 | 注册 provider、安装 settings namespace |
 | **Client 半** | `lib/client.js` 通过 `window.__ModuleLoader__.load` 加载 | 浏览器渲染「插件」标签页前 | 向 `settings.plugin.item` 插槽注入 UI 卡片 |
 
-两边通过 `settings` 服务通信:host 半用 `installSettingsSection(...)` 声明一个 namespace,client 半通过 `ctx.settingsScope.bind({namespace})` 读 / 写同一个 namespace。
+两边通过 `settings` 服务通信:host 半用 `ctx.settings.installSection(...)` 声明一个 namespace,client 半通过 `ctx.settingsScope.bind({namespace})` 读 / 写同一个 namespace。
 
 ### Host 半(`src/index.ts`)
 
 ```ts
-export function apply(ctx: Context, config: TavilyConfig): void {
-  let current: TavilyConfig = config
+// 默认值写在 schema 里(官方约定):settings 服务的 resolved 值 =
+// schema(mergeLayers(base, 用户层)),所以默认值进 schema 就等于同时
+// 进了卡片显示、用户文档层与搜索请求,不存在第二份默认值。
+export const Config: z<Config> = z.object({
+  maxResults: z.number().step(1).min(1).max(20).default(TAVILY_DEFAULT_MAX_RESULTS),
+  // …其余字段同理
+})
 
-  // 把默认 maxResults=7 注入 base 层,这样新装插件的卡片打开就显示 7,不是空白
-  const base: TavilyConfig = { maxResults: TAVILY_DEFAULT_MAX_RESULTS, ...config }
+export function apply(ctx: Context, config: Config): void {
+  // DSH ≥ 0.1.5 把节的来源作为 thunk 交给插件:每次搜索重新读取,
+  // 卡片改完立刻生效,无需重新注册 provider。
+  let current: () => Config = () => config
 
-  // 装 settings 命名空间 → UI 卡片可以编辑它
-  installSettingsSection(ctx, TAVILY_SETTINGS_NAMESPACE, Config, base, {
-    setSource: (source) => { current = source },
-    onChange: () => {},
+  // 装 settings 命名空间 → UI 卡片可以编辑它。`config` 已经过 schema
+  // 解析(默认值齐备),它本身就是完整的 base 层。
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.settings.installSection(ctx, TAVILY_SETTINGS_NAMESPACE, Config, config, {
+      // schema 表达不了的约束:写入即拒,而不是等到下次搜索才报错
+      validate: value => validateSection(value),
+      setSource: (source) => { current = source },
+      onChange: () => {},
+    })
   })
 
   // 注册 provider 到 web seam
   ctx.web.registerSearchProvider(
-    new TavilySearchProvider(() => resolveOptions(ctx, current))
+    new TavilySearchProvider(() => resolveOptions(ctx, current()))
   )
 }
 ```
@@ -567,7 +583,7 @@ export function apply(ctx: Context, config: TavilyConfig): void {
      ...
    }
    ```
-4. **解析响应**:`payload.answer` → `content`(模型引用的自然语言总结),`payload.results[]` → 标准化为 `{url, title, snippet}`,`snippet` 截断 600 字防污染上下文。
+4. **解析响应**:`payload.answer` → `content`(模型引用的自然语言总结),`payload.results[]` → 标准化为 `{url, title, snippet}`;无 URL 的结果直接丢弃(seam 契约要求 source 必有 URL),`snippet` 按 `snippetMaxChars`(默认 600 字)截断防污染上下文。
 5. **错误映射**:HTTP 非 2xx → `WEB_PROVIDER_ERROR`,abort → `WEB_ABORTED`,未配 key → `WEB_PROVIDER_ERROR` with detail。
 
 ### Client 半(`src/client/`)
@@ -630,7 +646,7 @@ A:**DSH ≥ 0.1.1 会**,只要插件名出现在 `~/.dsh/profiles/web/package.js
 **DSH < 0.1.1 不会自动合入** —— 那时还没有 `dsh.profile.bundles`,外部插件通过 `pnpm add` 装进 profile 后,DSH 不会读插件自带的 `cordis.patch.yml`,必须手动把 patch 内容追加到 `~/.dsh/profiles/web/cordis.patch.yml`。这是已知 footgun,见 [§ 安装流程 / Installation](#安装流程--installation) 与 [故障排查](#搜索走了-deepseek-而不是-tavily)。
 
 ### Q:可以用本插件的 host 半但用自己写的 UI 卡片吗?
-A:可以,host 半 (`src/index.ts` → `lib/index.js`) 完全独立。`installSettingsSection` 安装的 `web-search-tavily` namespace 是公共的,任何 client 半插件都可以 `ctx.settingsScope.bind({namespace: 'web-search-tavily'})` 读取并编辑它。
+A:可以,host 半 (`src/index.ts` → `lib/index.js`) 完全独立。`installSection` 安装的 `web-search-tavily` namespace 是公共的,任何 client 半插件都可以 `ctx.settingsScope.bind({namespace: 'web-search-tavily'})` 读取并编辑它。
 
 ### Q:`maxResults` 卡片写 10,Tavily 会扣几次配额?
 A:**一次**。`max_results` 是单次请求里的结果数,Tavily 按 **search 调用次数**计费,不是按返回的结果数。所以 `maxResults: 20` 和 `maxResults: 3` 在配额消耗上没区别。
@@ -729,8 +745,8 @@ ctx.slots.register(
 
 1. **`searchProvider` 真的设上了吗?**
    ```bash
-   grep -A1 "searchProvider" ~/.dsh/profiles/web/cordis.yml
-   # 应该看到 searchProvider: tavily
+   grep -A2 "id: web$" ~/.dsh/profiles/web/cordis.yml
+   # 应该看到 searchProvider: tavily,且 fetchProvider: http 仍在
    ```
    如果是通过 `dsh plugin add` 或 `pnpm add` 装的外部插件,需要**手动**把本插件 `cordis.patch.yml` 的内容合入 —— 参见 §安装 / 合并 cordis.patch.yml。
 
@@ -743,8 +759,9 @@ ctx.slots.register(
    - id: web
      config:                    # ← 整体替换,不要在已有的 web 节点下追加
        searchProvider: tavily
+       fetchProvider: http      # ← base 层原有的键必须一起写回来,否则被清掉
    ```
-   如果 DSH 默认 `web` 节点有别的字段(`apiBase` 等),会被一并清掉。需要保留的话,把它们的值一起写进来。
+   `@deepseek-ai/dsh-base` 的 `web` 行带 `searchProvider` + `fetchProvider`;只写 `searchProvider` 会把 `fetchProvider` 一并清掉,`web_fetch` 随即失去配置的 provider。任何一个要保留的键,值都必须在同一块里重述。
 
 ### 报错 `WEB_PROVIDER_CONFIGURED_MISSING`
 
@@ -804,6 +821,7 @@ dsh plugin --profile web remove dsh-tavily-search-plugin
 #    - id: web
 #      config:
 #        searchProvider: tavily
+#        fetchProvider: http
 
 # 3. 重启 DSH
 pnpm dsh web
@@ -824,18 +842,23 @@ dsh-tavily-search-plugin/
 ├── tsdown.config.ts         # 双构建:lib (ESM Node) + client (CJS 浏览器)
 ├── tsconfig.json            # 严格类型检查
 ├── src/
+│   ├── shared.ts            # ── 双半共享 ──
+│   │                         #   词汇表(searchDepth/topic/timeRange)、MCP 工具 id、让位文案
 │   ├── index.ts             # ── HOST 半 ──
 │   │                         #   apply(ctx, config) → ctx.web.registerSearchProvider(...)
-│   │                         #              + installSettingsSection("web-search-tavily", ...)
+│   │                         #              + installSection("web-search-tavily", ...)
 │   └── client/              # ── CLIENT 半 ──
-│       ├── index.ts         #   apply(ctx) → ctx.slots.inject("settings.plugin.item", ...)
-│       ├── config-card.ts   #   卡片 UI(staged form + 字段编辑 + 保存/放弃)
-│       ├── types.ts         #   ctx.slots / ctx.settingsScope 最小类型(声明合并到 cordis)
-│       ├── constants.ts     #   NAMESPACE, DISPLAY_NAME
-│       └── styles.ts        #   一次性 CSS 注入(主题变量)
+│       ├── index.ts         #   apply(ctx) → 注入样式 + 注册卡片(inject 四个服务)
+│       ├── config-card.ts   #   视图:渲染卡片、转发事件(不含模型逻辑)
+│       ├── card-model.ts    #   模型:字段表、草稿规则、staged 写入器(无 React,可被测试驱动)
+│       ├── types.ts         #   ctx.slots / ctx.settingsScope / ctx.remote 最小类型面
+│       └── styles.ts        #   一次性 CSS 注入(按模块 id 认领标签 + DOM 守卫)
+├── scripts/
+│   └── smoke-test.mjs       # 无宿主冒烟测试(`pnpm test`;`--live` 加打一次真实请求)
 └── lib/                     # 构建产物 (gitignored)
     ├── index.js             #   Cordis 加载器 import 的 host 半
     ├── index.d.ts           #   host 半的类型导出
+    ├── card-model.js        #   卡片模型的 ESM 产物(供 smoke test 在 Node 里驱动)
     └── client.js            #   __ModuleLoader__.load 加载的 browser bundle
 ```
 
@@ -870,9 +893,30 @@ pnpm build              # 重新构建
 # 如果是 host 半改动 → 重启 DSH
 # 如果只是 client 半改动 → 浏览器硬刷新就够了
 
-# DSH 日志(排查问题用)
-pnpm dsh web --verbose  # 或 --log-level=debug
+# 排查:插件加载失败会直接在 dsh 的 stdout 报出来(配置非法、模块解析失败都会)
+#   failed to apply loader entry web-search-tavily (dsh-tavily-search-plugin): invalid config: ...
+dsh --profile web --dump-config | grep -A3 'id: web-search-tavily'
 ```
+
+### 测试
+
+```bash
+pnpm test          # 构建 + 无宿主冒烟测试(纯逻辑,不联网)
+TAVILY_API_KEY=tvly-... node scripts/smoke-test.mjs --live   # 额外打一次真实请求(消耗 1 credit)
+```
+
+冒烟测试直接 import 构建产物(`lib/index.js` + `lib/card-model.js`),钉住这些不变式:
+
+- **宿主半**:schema 默认值与约束、section→provider 投影、请求体规则(结果数封顶 / `timeRange`
+  优先于 `days` / 空域名列表不发)、响应归一化(无 URL 的结果丢弃 / snippet 按 `snippetMaxChars`
+  截断 / `answer` 加标签)、`validateSection` 的写入期拒绝、MCP 让位模式(可用性恒真、`search`
+  不联网只回引导文案)。
+- **卡片模型**:字段表与宿主 schema/词汇表一致、草稿校验与强转、以及用 stub 服务驱动的写入器 ——
+  含「凭证域必须用位置参数调用 `remote.credentials`」「非法草稿整批拒绝(设置与凭证都不写)」
+  「宿主接受但未落盘要判失败」「保存期间的新编辑不被吞掉」「并发保存只跑一次」「dispose 释放
+  scope 与 remote 订阅」这些回归用例。
+
+纯逻辑都以具名导出留出了边界:加断言既不需要起 DSH,也不需要浏览器。
 
 ### 构建注意事项 / Build caveats
 

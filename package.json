@@ -17,9 +17,11 @@
   "files": [
     "lib/index.js",
     "lib/client.js",
+    "lib/card-model.js",
     "lib/index.d.ts",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "scripts/smoke-test.mjs"
   ],
   "dsh": {
     "bundle": {
@@ -28,12 +30,15 @@
     "client": {
       "platform": "web",
       "inject": [
-        "slots"
+        "@deepseek-ai/dsh-client-ui-settings-plugins",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-api-remotes"
       ]
     }
   },
   "scripts": {
     "build": "tsdown",
+    "test": "pnpm run build && node scripts/smoke-test.mjs",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf lib",
     "check": "node --check src/index.ts 2>/dev/null; tsc --noEmit",

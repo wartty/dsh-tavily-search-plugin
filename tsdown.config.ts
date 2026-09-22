@@ -58,6 +58,27 @@ const lib = {
 }
 
 /**
+ * Card model: ESM, platform-neutral, emitted as lib/card-model.js.
+ *
+ * The card's field specs, draft rules and staged-write controller are React-free
+ * on purpose, and this artifact is what makes them testable: `pnpm test` imports
+ * it in Node and drives the write planner with stub services instead of a
+ * browser. It gets its own build so the browser bundle and the host bundle each
+ * stay self-contained — no shared chunk to ship or resolve.
+ */
+const model = {
+  name: 'dsh-tavily-search-plugin/card-model',
+  entry: { 'card-model': 'src/client/card-model.ts' },
+  outDir: 'lib',
+  format: ['esm'],
+  platform: 'neutral',
+  target: 'es2022',
+  dts: false,
+  clean: false,
+  outputOptions: { entryFileNames: 'card-model.js' },
+}
+
+/**
  * Client half: CJS browser bundle, handshaked by window.__ModuleLoader__.load.
  *
  * The DSH monorepo's purity gate (packages/client/tsdown.client.ts) keeps a
@@ -92,4 +113,4 @@ const client = {
   },
 }
 
-export default defineConfig([lib, client])
+export default defineConfig([lib, model, client])

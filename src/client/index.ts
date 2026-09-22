@@ -5,9 +5,10 @@
  * - inject the card stylesheet (one `<style data-plugin>` tag) once per page
  * - register the Tavily card into the `settings.plugin.item` slot
  *
- * Declares only the `slots` dependency: the card uses `settingsScope`
- * opportunistically (cards render in a "no settings service" state when it
- * is absent), and the loader does not need to gate plugin loading on it.
+ * Declares every client service the card binds, so the browser cordis instance
+ * parks this plugin until each provider is mounted. A `slots`-only declaration
+ * once let `apply` run before the settings scope existed, which left the card
+ * rendering its "settings service unavailable" state with no config fields.
  *
  * No `@deepseek-ai/dsh-client-*` value import — see `types.ts` for the
  * minimal-surface approach that keeps the bundle standalone.
@@ -18,8 +19,13 @@ import type { Context } from '@deepseek-ai/cordis'
 import { registerConfigCard } from './config-card.ts'
 import { injectStyles } from './styles.ts'
 
-/** Dependency: load only after the slot service is mounted. */
-export const inject = ['slots']
+/**
+ * Required client services (cordis fiber inject): the slot seat the card
+ * registers into (`slots`), the settings scope it edits (`settingsScope`), and
+ * the remote surface carrying both the credential domain and its invalidation
+ * events (`remote`, `remote.credentials`).
+ */
+export const inject = ['slots', 'settingsScope', 'remote', 'remote.credentials']
 
 /** Mount the stylesheet once and register the card. */
 export function apply(ctx: Context): void {

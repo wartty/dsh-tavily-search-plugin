@@ -3,14 +3,17 @@
 # Loaded automatically when the package is installed into a profile (see
 # `package.json` `dsh.bundle.patch`). Two entries:
 #   1. `- insert:` installs the Tavily provider into the plugin table.
-#   2. `- id: web config.searchProvider: tavily` pins the web seam to the
-#      Tavily provider; without this pin, DSH throws `WEB_PROVIDER_AMBIGUOUS`
-#      when both DeepSeek and Tavily are registered (see
-#      `packages/web/web/src/index.ts` `resolveProvider`).
+#   2. `- id: web config:` pins the web seam to the Tavily provider; without
+#      this pin, DSH throws `WEB_PROVIDER_AMBIGUOUS` when both DeepSeek and
+#      Tavily are registered (see `packages/web/web/src/index.ts`
+#      `resolveProvider`). A layer REPLACES the target row's whole `config` —
+#      layers never merge per key — so every key the earlier layer relied on is
+#      restated there.
 #
-# To override defaults (e.g. a self-hosted Tavily proxy), add a second
-# `- id: web-search-tavily config:` block. The host half reads these values
-# on every search, so a restart is needed for host changes to take effect.
+# To override a config value, either edit the card in Settings → Plugins (it
+# writes the user layer, which the host reads on every search — no restart), or
+# add a `- id: web-search-tavily config:` block below. Values in THIS file are
+# cold-start config: changing them needs a restart.
 #
 # Optional configuration keys for `id: web-search-tavily`:
 #   apiKey:          literal Tavily API key (avoid committing)
@@ -35,3 +38,8 @@
 - id: web
   config:
     searchProvider: tavily
+    # Restated from `@deepseek-ai/dsh-base`: this layer replaces the row's whole
+    # `config`, so dropping this key would leave `web_fetch` with no configured
+    # provider (it would fall back to the sole registered fetch provider, and
+    # throw WEB_PROVIDER_AMBIGUOUS as soon as a second one appears).
+    fetchProvider: http

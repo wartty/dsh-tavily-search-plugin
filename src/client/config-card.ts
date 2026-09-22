@@ -1,710 +1,280 @@
 /**
- * The Tavily settings card.
+ * The Tavily settings card — VIEW half of the client.
  *
  * Registers one card into the `settings.plugin.item` slot keyed by
- * `web-search-tavily`. The card edits the same settings namespace the host
- * half installed via `installSettingsSection`; the host reads the namespace on
- * every search, so a save takes effect immediately on the next tool call.
+ * `web-search-tavily`, and renders it. Field specs, draft rules and the
+ * staged-write controller live in `./card-model.ts`, which is React-free and
+ * driven directly by `pnpm test`; this module only renders what it reports and
+ * routes events back into it.
  *
- * UI shape mirrors the built-in `WebSearchCard` in
- * `packages/client/ui-settings-plugins`: an editable header row (title,
- * description, "unsaved" badge, chevron) followed by three fields — API Key
- * (credentials domain), Endpoint URL, Max results per search — and a footer
- * with discard / save. Differences are limited to (1) the credential control
- * being hand-written instead of importing `SecretField`, since a standalone
- * bundle may not value-import that package, and (2) inline copy in zh/en.
+ * State matrix (the card renders in every state, it never silently vanishes):
+ * - `status === 'loading'`: the host has not answered yet.
+ * - `status === 'unavailable'`: the namespace is hidden from the web surface, or
+ *   the connection holds preferences in memory (a non-loopback page).
+ * - `status === 'ready'`: the editable form.
  *
- * State matrix (the card renders in every state, never silently vanishes):
- * - `form === undefined`: `settingsScope` / `connection` / `remote` services
- *   absent (non-web profile); render an "unmounted" status card.
- * - `status === 'loading'`: host has not answered yet; render "loading".
- * - `status === 'unavailable'`: namespace hidden from the web surface; render
- *   an "unavailable" status card. The host half is unaffected.
- * - `status === 'ready'`: render the editable form.
+ * USER-VISIBLE COPY is Chinese-only on purpose (single-language deployment); the
+ * built-in cards localize through `ctx.locale`, which would mean shipping
+ * dictionaries for a plugin whose audience is this profile.
  * @module dsh-tavily-search-plugin/client/config-card
  */
 
 import React from 'react'
 import type { Context } from '@deepseek-ai/cordis'
-import { NAMESPACE } from './constants.ts'
-import type { SettingsScopeBinderLike, SettingsScopeLike } from './types.ts'
+import { TAVILY_MCP_TOOLS, TAVILY_SETTINGS_NAMESPACE } from '../shared.ts'
+import { booleanText, CardForm, FIELDS } from './card-model.ts'
+import type { CardShell, FieldSpec } from './card-model.ts'
+import type { RemoteLike, SettingsScopeBinderLike } from './types.ts'
 
-// ---- Field declaration ----
-//
-// 基本两个字段（baseURL / maxResults）沿用内置 WebSearchCard 的两行布局；
-// 其余是 Tavily 当前 REST API 的完整可调面，全部走同一个 staged form 模型。
+/** Plugin display name shown on the card header. */
+const DISPLAY_NAME = 'Tavily'
 
-interface FieldSpec {
-  /** Settings-section field name. */
-  field: string
-  kind: 'text' | 'number' | 'select' | 'textlist' | 'boolean'
-  /** Visible label (zh; API Key 单独保留英文 'API key')。 */
-  label: string
-  /** Hint shown under the control (zh)。 */
-  hint: string
-  /** Invalid-draft label. */
-  invalidLabel?: string
-  /** Number-field floor. */
-  min?: number
-  /** Number-field ceiling. */
-  max?: number
-  /** Options for `select` fields (verbatim wire values). */
-  options?: readonly string[]
-  /** Placeholder for text / textlist inputs. */
-  placeholder?: string
-}
-
-const FIELDS: readonly FieldSpec[] = [
-  {
-    field: 'baseURL',
-    kind: 'text',
-    label: '接口地址',
-    hint: '默认 https://api.tavily.com,/search 由插件自动追加。',
-  },
-  {
-    field: 'maxResults',
-    kind: 'number',
-    label: '每次搜索最多结果数',
-    hint: 'Tavily 每次搜索返回的结果数上限(1–20),默认 7。',
-    invalidLabel: '必须是 1–20 的整数',
-    min: 1,
-    max: 20,
-  },
-  {
-    field: 'searchDepth',
-    kind: 'select',
-    label: '搜索深度',
-    hint: 'basic/fast/ultra-fast 计 1 credit,advanced 计 2 credits。',
-    options: ['basic', 'advanced', 'fast', 'ultra-fast'],
-  },
-  {
-    field: 'topic',
-    kind: 'select',
-    label: '主题类别',
-    hint: 'news 偏向实时新闻;general 为通用搜索;finance 为财经数据。',
-    options: ['general', 'news', 'finance'],
-  },
-  {
-    field: 'timeRange',
-    kind: 'select',
-    label: '时间范围',
-    hint: 'Tavily 较新的时间窗形式(优先于"回溯天数")。',
-    options: ['day', 'week', 'month', 'year', 'd', 'w', 'm', 'y'],
-  },
-  {
-    field: 'days',
-    kind: 'number',
-    label: '回溯天数',
-    hint: '仅 topic=news 时生效;0 表示不限时间窗(旧版字段,建议改用"时间范围")。',
-    invalidLabel: '必须是 ≥ 0 的整数',
-    min: 0,
-  },
-  {
-    field: 'startDate',
-    kind: 'text',
-    label: '起始日期',
-    hint: '仅返回该日期之后发布/更新的结果,格式 YYYY-MM-DD。',
-    placeholder: '2026-01-01',
-  },
-  {
-    field: 'endDate',
-    kind: 'text',
-    label: '截止日期',
-    hint: '仅返回该日期之前发布/更新的结果,格式 YYYY-MM-DD。',
-    placeholder: '2026-12-31',
-  },
-  {
-    field: 'chunksPerSource',
-    kind: 'number',
-    label: '每源内容块数',
-    hint: '每个来源返回的内容片段数(1–3),控制 content 长度。',
-    invalidLabel: '必须是 1–3 的整数',
-    min: 1,
-    max: 3,
-  },
-  {
-    field: 'includeDomains',
-    kind: 'textlist',
-    label: '包含域名',
-    hint: '逗号分隔,结果仅限定这些域名(最多 300 个)。',
-    placeholder: 'example.com, news.site.org',
-  },
-  {
-    field: 'excludeDomains',
-    kind: 'textlist',
-    label: '排除域名',
-    hint: '逗号分隔,从结果中排除这些域名(最多 150 个)。',
-    placeholder: 'spam.example, junk.org',
-  },
-  {
-    field: 'useMcp',
-    kind: 'boolean',
-    label: '使用 Tavily MCP 服务器',
-    hint: '开启后 web_search 让位给 mcp__tavily__* 系列工具(需先在 cordis.patch.yml 配置 MCP 服务器)。',
-  },
-]
-
-// ---- Staged form model ----
-
-type StagedEdit =
-  | { kind: 'edit'; text: string }
-  | { kind: 'clear' }
-
-interface FieldState {
-  /** Current text in the input. */
-  text: string
-  /** Saving this draft would leave a user-layer override. */
-  overridden: boolean
-  /** Draft does not match the field's kind-specific rules. */
-  invalid: boolean
-}
-
-interface CardShell {
-  status: 'loading' | 'ready' | 'unavailable'
-  available: boolean
-  writable: boolean
-  dirty: boolean
-  invalid: boolean
-  saving: boolean
-  failed: boolean
-}
-
-interface PlannedWrite {
-  field: string
-  /** `undefined` when the staged draft is invalid and the field should be left alone. */
-  run: (() => Promise<boolean>) | undefined
-}
-
-// ---- Secret (API Key) plane ----
-
-interface CredentialState {
-  ref: string
-  configured: boolean
-  writable: boolean
-  /** Last staged literal; cleared on save. */
-  staged: string
-  /** True when the staged literal is non-empty. */
-  dirty: boolean
-  saving: boolean
-  failed: boolean
-}
-
-// ---- Minimal connection / remote surfaces (avoid value-importing dsh-client-*) ----
-
-interface IApiClient {
-  credentials: {
-    describe(request: { refs: readonly string[] }): Promise<{ result: { ok: boolean; value: { credentials: Record<string, { configured: boolean; writable: boolean } | undefined> } } }>
-    set(request: { ref: string; value: string }): Promise<{ result: { ok: boolean } }>
-  }
-}
-
-interface RemoteBusLike {
-  $on(event: string, listener: (payload: unknown) => void): () => void
-}
-
-// ---- Form controller ----
-
-/**
- * Staged form. Edits never touch the document; `save` is the single mutation
- * point and re-reads the host's verdict afterwards so the dirty/failed flags
- * settle against the authoritative state.
- */
-class CardForm {
-  private readonly staged = new Map<string, StagedEdit>()
-  private readonly listeners = new Set<() => void>()
-  private saving = false
-  private failed = false
-  private credential: CredentialState = { ref: '', configured: false, writable: true, staged: '', dirty: false, saving: false, failed: false }
-  private readonly unsubRemote: () => void
-
-  constructor(
-    private readonly scope: SettingsScopeLike,
-    private readonly api: IApiClient,
-    private readonly remote: RemoteBusLike,
-  ) {
-    scope.subscribe(() => this.publish())
-    void this.readCredential()
-    // credentials/updated payload shape: string ref (newer DSH) or {ref: string}.
-    this.unsubRemote = remote.$on('credentials/updated', (payload) => {
-      const ref = refOfString(payload)
-      if (ref !== undefined && ref === this.credential.ref) void this.readCredential()
-    })
-  }
-
-  dispose(): void {
-    this.unsubRemote()
-    this.listeners.clear()
-  }
-
-  subscribe(listener: () => void): () => void {
-    this.listeners.add(listener)
-    return () => { this.listeners.delete(listener) }
-  }
-
-  shell(): CardShell {
-    const snap = this.scope.getSnapshot()
-    return {
-      status: snap.status,
-      available: snap.status === 'ready',
-      writable: snap.writable,
-      dirty: this.isDirty(),
-      invalid: this.isInvalid(),
-      saving: this.saving,
-      failed: this.failed,
-    }
-  }
-
-  fieldState(field: string): FieldState {
-    const snap = this.scope.getSnapshot()
-    const value = snap.value as Record<string, unknown> | undefined
-    const user = snap.user as Record<string, unknown> | undefined
-    const baseText = value === undefined ? '' : stringOf(value[field])
-    const userText = user === undefined ? undefined : stringOf(user[field])
-    const staged = this.staged.get(field)
-    const draft = staged === undefined
-      ? baseText
-      : staged.kind === 'edit'
-        ? staged.text
-        : ''
-    return {
-      text: draft,
-      overridden: userText !== undefined,
-      invalid: !isValidDraft(this.fieldSpec(field), draft),
-    }
-  }
-
-  /** The staged (unsaved) draft for one field; `undefined` when nothing is staged. */
-  stagedValue(field: string): string | undefined {
-    const staged = this.staged.get(field)
-    return staged?.kind === 'edit' ? staged.text : undefined
-  }
-
-  /** Stage a text edit for one field. */
-  edit(field: string, text: string): void {
-    this.staged.set(field, { kind: 'edit', text })
-    this.failed = false
-    this.publish()
-  }
-
-  /** Stage a clear (drop the user override so the field inherits base). */
-  clear(field: string): void {
-    this.staged.set(field, { kind: 'clear' })
-    this.failed = false
-    this.publish()
-  }
-
-  /** Drop every staged edit without touching the host. */
-  discard(): void {
-    this.staged.clear()
-    this.credential = { ...this.credential, staged: '', dirty: false, failed: false }
-    this.failed = false
-    this.publish()
-  }
-
-  /** API Key plane: stage the literal; commit happens in save(). */
-  editKey(text: string): void {
-    this.credential = { ...this.credential, staged: text, dirty: text.length > 0, failed: false }
-    this.publish()
-  }
-
-  /** Flush every staged edit to the host. */
-  async save(): Promise<void> {
-    const writes = this.plan()
-    const credentialWrite = this.credential.dirty && this.credential.staged.length > 0
-
-    if (writes.length === 0 && !credentialWrite) return
-    this.saving = true
-    if (credentialWrite) this.credential = { ...this.credential, saving: true }
-    this.failed = false
-    this.publish()
-
-    try {
-      let allOk = true
-
-      // Settings writes (sequential: revision fence).
-      for (const write of writes) {
-        if (write.run === undefined) {
-          allOk = false
-          continue
-        }
-        const ok = await write.run()
-        if (!ok) allOk = false
-      }
-
-      // Credential write (single round trip).
-      if (credentialWrite) {
-        try {
-          await this.api.credentials.set({ ref: this.credential.ref, value: this.credential.staged })
-          await this.readCredential()
-        } catch (_credentialWriteFailure) {
-          allOk = false
-          this.credential = { ...this.credential, failed: true }
-        }
-      }
-
-      if (allOk) {
-        this.staged.clear()
-        this.credential = { ...this.credential, staged: '', dirty: false, failed: false }
-      } else {
-        this.failed = true
-      }
-    } finally {
-      this.saving = false
-      this.credential = { ...this.credential, saving: false }
-      this.publish()
-    }
-  }
-
-  /** Project the secret plane's current state to the renderer. */
-  keyState(): CredentialState {
-    return this.credential
-  }
-
-  // ---- internals ----
-
-  private async readCredential(): Promise<void> {
-    const ref = refOf(this.scope.getSnapshot())
-    if (ref !== this.credential.ref) {
-      this.credential = {
-        ref, configured: false, writable: true, staged: '', dirty: false, saving: false, failed: false,
-      }
-      this.publish()
-    }
-    let response: Awaited<ReturnType<IApiClient['credentials']['describe']>>
-    try {
-      response = await this.api.credentials.describe({ refs: [ref] })
-    } catch (_credentialReadFailure) {
-      // Read failure is non-fatal: the card stays usable, the key control
-      // simply reports the last state it knew.
-      return
-    }
-    if (!response.result.ok || ref !== refOf(this.scope.getSnapshot())) return
-    const view = response.result.value.credentials[ref]
-    const next: CredentialState = {
-      ref,
-      configured: view?.configured ?? false,
-      writable: view?.writable ?? true,
-      staged: this.credential.staged,
-      dirty: this.credential.dirty,
-      saving: this.credential.saving,
-      failed: this.credential.failed,
-    }
-    if (next.configured === this.credential.configured && next.writable === this.credential.writable) return
-    this.credential = next
-    this.publish()
-  }
-
-  private fieldSpec(field: string): FieldSpec {
-    const spec = FIELDS.find(candidate => candidate.field === field)
-    if (spec === undefined) throw new Error(`unknown field "${field}"`)
-    return spec
-  }
-
-  private isDirty(): boolean {
-    return this.staged.size > 0
-  }
-
-  private isInvalid(): boolean {
-    for (const [field, staged] of this.staged) {
-      if (staged.kind === 'clear') continue
-      if (!isValidDraft(this.fieldSpec(field), staged.text)) return true
-    }
-    return false
-  }
-
-  private plan(): PlannedWrite[] {
-    const writes: PlannedWrite[] = []
-    for (const [field, staged] of this.staged) {
-      const spec = this.fieldSpec(field)
-      if (staged.kind === 'clear') {
-        writes.push({ field, run: async () => { await this.scope.unset(field); return true } })
-        continue
-      }
-      if (!isValidDraft(spec, staged.text)) {
-        writes.push({ field, run: undefined })
-        continue
-      }
-      const value = coerceDraft(spec, staged.text)
-      writes.push({ field, run: async () => { await this.scope.set(field, value); return true } })
-    }
-    return writes
-  }
-
-  private publish(): void {
-    for (const listener of this.listeners) listener()
-  }
-}
-
-// ---- Draft coercion & validation ----
-
-function isValidDraft(spec: FieldSpec, text: string): boolean {
-  // Empty always means "inherit the base / unset", so it is a valid draft.
-  if (text === '') return true
-  switch (spec.kind) {
-    case 'text':
-    case 'textlist':
-    case 'boolean':
-      return true
-    case 'select':
-      return spec.options === undefined || spec.options.includes(text)
-    case 'number': {
-      if (!/^-?\d+$/.test(text)) return false
-      const value = Number(text)
-      return Number.isInteger(value)
-        && (spec.min === undefined || value >= spec.min)
-        && (spec.max === undefined || value <= spec.max)
-    }
-  }
-}
-
-function coerceDraft(spec: FieldSpec, text: string): unknown {
-  if (text === '') return undefined
-  switch (spec.kind) {
-    case 'number':
-      return Number(text)
-    case 'boolean':
-      return text === 'true'
-    case 'textlist':
-      return text
-        .split(',')
-        .map(part => part.trim())
-        .filter(part => part.length > 0)
-    case 'text':
-    case 'select':
-      return text
-  }
-}
-
-function stringOf(value: unknown): string {
-  if (value === undefined || value === null) return ''
-  if (typeof value === 'string') return value
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
-  if (Array.isArray(value)) {
-    return value
-      .filter((item): item is string => typeof item === 'string')
-      .join(', ')
-  }
-  return ''
-}
-
-function refOf(snapshot: { value?: unknown }): string {
-  const value = snapshot.value as Record<string, unknown> | undefined
-  const declared = value?.['apiKeyEnv']
-  return typeof declared === 'string' && declared.length > 0 ? declared : 'TAVILY_API_KEY'
-}
-
-function refOfString(payload: unknown): string | undefined {
-  if (typeof payload === 'string') return payload
-  if (payload !== null && typeof payload === 'object' && 'ref' in payload) {
-    const value = (payload as { ref?: unknown }).ref
-    if (typeof value === 'string') return value
-  }
-  return undefined
-}
-
-// ---- Registration ----
+/** One-line subtitle: what this card configures. */
+const DISPLAY_DESCRIPTION = 'Tavily API 搜索提供方(默认走免费额度)。'
 
 /**
  * Register the Tavily card into `settings.plugin.item`.
  *
- * `settingsScope` / `connection` / `remote` are the optional services the
- * Settings page wires up; when any is missing (non-web profile) we still
- * register the card so the slot owner has something to render, and the
- * component falls through to the "unmounted" status panel.
+ * All four services are declared in this bundle's `inject` (see
+ * `src/client/index.ts`), so they are mounted by the time this runs. The
+ * absent-services branch only guards a profile that mounts this bundle without
+ * the settings surface; a card that cannot edit anything is worth less than a
+ * diagnostic line.
+ * @param ctx - the browser plugin context.
  */
 export function registerConfigCard(ctx: Context): void {
   const settingsScope = ctx.get('settingsScope') as SettingsScopeBinderLike | undefined
-  const connection = ctx.get('connection') as { api: IApiClient } | undefined
-  const remote = ctx.get('remote') as RemoteBusLike | undefined
+  // The credential plane rides the remote surface (`remote.credentials`), NOT
+  // `connection`: the connection handle carries transport state only.
+  const remote = ctx.get('remote') as RemoteLike | undefined
 
-  if (settingsScope === undefined || connection === undefined || remote === undefined) {
-    // eslint-disable-next-line no-console
-    console.warn(`[${NAMESPACE}] settingsScope/connection/remote service absent; the config card shows the unmounted state`)
+  if (settingsScope === undefined || remote === undefined) {
+    ctx.logger.warn(
+      `[${TAVILY_SETTINGS_NAMESPACE}] settingsScope/remote missing; the card cannot mount`,
+    )
+    return
   }
 
-  const form = settingsScope !== undefined && connection !== undefined && remote !== undefined
-    ? new CardForm(settingsScope.bind({ namespace: NAMESPACE }), connection.api, remote)
-    : undefined
+  const form = new CardForm(settingsScope.bind({ namespace: TAVILY_SETTINGS_NAMESPACE }), remote)
+  // The form owns two subscriptions; tie their release to this plugin's fiber so
+  // an HMR reload or unload cannot leave a stale instance publishing into
+  // unmounted components.
+  ctx.effect(() => () => form.dispose(), 'tavily: settings-card form')
 
+  // Keyed slot registration: the plugins tab dispatches one item per served
+  // settings namespace and renders whatever card claims that key. Keyed entries
+  // declare neither `order` nor `label` — the tab owns the ordering and the card
+  // owns its own copy (settings-card cookbook §3). `inject` hands the card its
+  // controller as props, which keeps the component identity stable across
+  // re-registrations (a fresh component function would remount and drop the
+  // card's open/guide state).
   ctx.slots.inject('settings.plugin.item', () => ctx.slots.register(
-    { name: 'settings.plugin.item', key: NAMESPACE, order: 30, label: NAMESPACE },
-    () => React.createElement(ConfigCard, { form }),
+    { name: 'settings.plugin.item', key: TAVILY_SETTINGS_NAMESPACE, inject: () => ({ form }) },
+    ConfigCard,
   ))
 }
 
 // ---- Card UI ----
 
+/** Props the slot injects into {@link ConfigCard}. */
+interface ConfigCardProps {
+  form?: CardForm
+}
+
 /**
- * Render the card body. Hooks MUST be declared above every early return —
+ * Render the card body. Every hook is declared above every early return:
  * switching from "loading" to "ready" re-renders, and React would throw
- * "Rendered more hooks than during the previous render" if a hook sat below
- * a return-null.
+ * "Rendered more hooks than during the previous render" if a hook sat below one.
+ * @param props - the controller injected by the slot registration.
+ * @returns the card element.
  */
-function ConfigCard({ form }: { form: CardForm | undefined }): React.ReactElement {
-  const [, forceRender] = React.useReducer((count: number) => count + 1, 0)
+function ConfigCard({ form }: ConfigCardProps): React.ReactElement {
   const [open, setOpen] = React.useState(false)
   // MCP hand-off confirmation flow: 'asking' when the user flips useMcp on,
   // 'guide' after they answer "not configured yet" (shows the patch snippet).
   const [mcpConfirm, setMcpConfirm] = React.useState<'idle' | 'asking' | 'guide'>('idle')
-  React.useEffect(() => (form === undefined ? undefined : form.subscribe(forceRender)), [form])
+  // `useSyncExternalStore` rather than subscribe-in-an-effect: a publish landing
+  // between the first render and the effect would otherwise be lost, leaving the
+  // card on "loading" until the next user input. `shell()` returns a cached
+  // object, so React's identity check re-renders only on a real change.
+  const subscribe = React.useCallback(
+    (notify: () => void) => form?.subscribe(notify) ?? (() => {}),
+    [form],
+  )
+  const shell = React.useSyncExternalStore(subscribe, () => form?.shell() as CardShell)
 
   if (form === undefined) {
     return statusCard(
       '设置服务不可用',
-      'settingsScope / connection / remote 服务缺失,本卡片无法编辑。请用 `pnpm dsh web` 启动 web profile。',
+      '插件未拿到 settingsScope / remote 服务,卡片无法编辑。检查 profile 是否挂载了设置界面(web profile 默认挂载)。',
     )
   }
-
-  const shell = form.shell()
   if (!shell.available) {
     if (shell.status === 'unavailable') {
       return statusCard(
-        `设置命名空间 "${NAMESPACE}" 未对 Web 暴露`,
-        'DSH 的设置 API 默认只对浏览器暴露部分命名空间,本命名空间不在已暴露列表里,卡片为只读状态。host 半不受影响,`ctx.web` 每次搜索仍会读取该命名空间。',
-        '如果你用的是旧版本 DSH,见插件 README 的故障排查章节;新版本已默认暴露所有命名空间。',
+        `设置命名空间 "${TAVILY_SETTINGS_NAMESPACE}" 当前不可写`,
+        '两种成因:该命名空间未对浏览器暴露(旧版 DSH 有白名单),或当前连接把偏好保留在内存里(非 loopback 页面不落盘)。host 半不受影响,`ctx.web` 每次搜索仍会读取该命名空间。',
+        '在 DSH 主机本机用 dsh web 打印的地址打开页面,可以拿到可持久化的设置面;命名空间暴露情况见插件 README 的故障排查章节。',
       )
     }
     return statusCard(
       '正在读取配置…',
-      '等待 host 端首次回答 `settings.describe`;到达后卡片会自动切换为可编辑状态。',
+      '等待 host 端首次回答 settings.describe;到达后卡片会自动切换为可编辑状态。',
     )
   }
 
-  const blocked = !shell.dirty || shell.invalid || shell.saving
-  const cardClass = open ? 'dstav-card dstav-card-open' : 'dstav-card'
   const key = form.keyState()
-  const keyStatusLabel = key.saving
-    ? '保存中…'
-    : key.dirty
-      ? '未保存'
-      : key.configured
-        ? '已配置'
-        : '未配置'
-  const keyStatusClass = key.configured || key.dirty || key.saving
-    ? 'dstav-badge'
-    : 'dstav-badge-muted'
+  const onMcpToggled = (checked: boolean) => setMcpConfirm(checked ? 'asking' : 'idle')
 
   return React.createElement(
     'li',
-    { className: cardClass },
+    { className: open ? 'dstav-card dstav-card-open' : 'dstav-card' },
     React.createElement(
       'button',
       {
         type: 'button',
         className: 'dstav-header',
         'aria-expanded': open,
-        onClick: () => setOpen(!open),
+        onClick: () => setOpen(current => !current),
       },
       React.createElement(
         'span',
         { className: 'dstav-head-text' },
-        React.createElement('span', { className: 'dstav-name' }, 'Tavily'),
-        React.createElement(
-          'span',
-          { className: 'dstav-description' },
-          'Tavily 搜索提供方。',
-        ),
+        React.createElement('span', { className: 'dstav-name' }, DISPLAY_NAME),
+        React.createElement('span', { className: 'dstav-description' }, DISPLAY_DESCRIPTION),
       ),
-      shell.dirty || key.dirty ? React.createElement('span', { className: 'dstav-pending' }, 'unsaved') : null,
+      shell.dirty || key.dirty
+        ? React.createElement('span', { className: 'dstav-badge' }, 'unsaved')
+        : null,
       chevron(open),
     ),
     open
       ? React.createElement(
         'div',
         { className: 'dstav-body' },
-        !shell.writable
-          ? React.createElement(
+        shell.writable
+          ? null
+          : React.createElement(
             'p',
             { className: 'dstav-read-only', role: 'status' },
             '当前设置文档为只读(memory 模式或只读 provider),所有改动不会持久化。',
-          )
-          : null,
-
-        // --- API Key (credentials domain) ---
-        React.createElement(
-          'div',
-          { className: 'dstav-field' },
-          React.createElement(
-            'div',
-            { className: 'dstav-field-head' },
-            React.createElement(
-              'label',
-              { className: 'dstav-label', htmlFor: 'dstav-api-key' },
-              'API key',
-            ),
-            React.createElement(
-              'span',
-              { className: 'dstav-badges' },
-              React.createElement('span', { className: keyStatusClass }, keyStatusLabel),
-            ),
           ),
-          React.createElement('input', {
-            id: 'dstav-api-key',
-            className: 'dstav-input',
-            type: 'password',
-            autoComplete: 'off',
-            placeholder: key.configured ? '已配置——输入新值以替换' : '输入 Tavily API Key (tvly-...)',
-            disabled: !key.writable,
-            value: key.staged,
-            onChange: (event: React.ChangeEvent<HTMLInputElement>) => form.editKey(event.target.value),
-          }),
-          React.createElement(
-            'p',
-            { className: 'dstav-hint' },
-            '写入后仅存于 DSH 凭证域,不会随 settings 文档回传。',
-          ),
-        ),
-
-        // --- Settings fields (mirrors built-in WebSearchCard's 2-row layout) ---
+        keyField(form, key),
+        // Field order is the model's; the toggle that opens the MCP guide is the
+        // only field the view reacts to beyond staging its draft.
         FIELDS.map(spec => renderField(
           form,
           spec,
           shell,
-          spec.field === 'useMcp'
-            ? (checked) => setMcpConfirm(checked ? 'asking' : 'idle')
-            : undefined,
+          spec.field === 'useMcp' ? onMcpToggled : undefined,
         )),
-
-        // --- MCP hand-off confirmation / patch-snippet guide ---
-        mcpPanel(mcpConfirm, setMcpConfirm, form),
-
-        // --- Footer ---
-        React.createElement(
-          'div',
-          { className: 'dstav-footer' },
-          shell.failed
-            ? React.createElement(
-              'p',
-              { className: 'dstav-failed', role: 'status' },
-              '保存失败;草稿已保留,请修正后重试。',
-            )
-            : null,
-          React.createElement(
-            'button',
-            {
-              type: 'button',
-              className: 'dstav-discard',
-              disabled: !shell.dirty || shell.saving,
-              onClick: () => form.discard(),
-            },
-            '放弃',
-          ),
-          React.createElement(
-            'button',
-            {
-              type: 'button',
-              className: 'dstav-save',
-              disabled: blocked && !key.dirty,
-              onClick: () => { void form.save() },
-            },
-            shell.saving ? '保存中…' : '保存',
-          ),
-        ),
+        React.createElement(McpPanel, { state: mcpConfirm, set: setMcpConfirm, form }),
+        footer(shell, form, key.dirty),
       )
       : null,
   )
 }
 
+/**
+ * The API-key control. It reads and writes the credentials domain, not the
+ * settings document, so the literal never rides a settings response.
+ * @param form - the form controller.
+ * @param key - the credential plane's state.
+ * @returns the control row.
+ */
+function keyField(form: CardForm, key: ReturnType<CardForm['keyState']>): React.ReactElement {
+  const statusLabel = key.saving
+    ? '保存中…'
+    : key.dirty
+      ? '未保存'
+      : key.configured
+        ? '已配置'
+        : '未配置'
+  const statusClass = key.configured || key.dirty || key.saving ? 'dstav-badge' : 'dstav-badge-muted'
+  return React.createElement(
+    'div',
+    { className: 'dstav-field' },
+    React.createElement(
+      'div',
+      { className: 'dstav-field-head' },
+      React.createElement('label', { className: 'dstav-label', htmlFor: 'dstav-api-key' }, 'API key'),
+      React.createElement(
+        'span',
+        { className: 'dstav-badges' },
+        React.createElement('span', { className: statusClass }, statusLabel),
+      ),
+    ),
+    React.createElement('input', {
+      id: 'dstav-api-key',
+      className: 'dstav-input',
+      type: 'password',
+      autoComplete: 'off',
+      placeholder: key.configured ? '已配置——输入新值以替换' : '输入 Tavily API Key (tvly-...)',
+      disabled: !key.writable || key.saving,
+      value: key.staged,
+      onChange: (event: React.ChangeEvent<HTMLInputElement>) => form.editKey(event.target.value),
+    }),
+    React.createElement(
+      'p',
+      { className: 'dstav-hint' },
+      `写入后仅存于 DSH 凭证域(引用 ${key.ref}),不会随 settings 文档回传。`,
+    ),
+  )
+}
+
+/**
+ * The discard/save footer.
+ * @param shell - the card-wide projection.
+ * @param form - the form controller.
+ * @param keyDirty - whether an API-key literal is staged.
+ * @returns the footer element.
+ */
+function footer(shell: CardShell, form: CardForm, keyDirty: boolean): React.ReactElement {
+  // The key plane lives outside `staged`, so its draft counts as pending work:
+  // Discard must be able to undo it, and Save must not be blocked by an invalid
+  // settings draft while a key is waiting (the model refuses the whole save).
+  const pending = shell.dirty || keyDirty
+  return React.createElement(
+    'div',
+    { className: 'dstav-footer' },
+    shell.failed
+      ? React.createElement(
+        'p',
+        { className: 'dstav-failed', role: 'status' },
+        '保存未全部生效;未落盘的草稿已保留,请修正或重试。',
+      )
+      : null,
+    React.createElement(
+      'button',
+      {
+        type: 'button',
+        className: 'dstav-discard',
+        disabled: !pending || shell.saving,
+        onClick: () => form.discard(),
+      },
+      '放弃',
+    ),
+    React.createElement(
+      'button',
+      {
+        type: 'button',
+        className: 'dstav-save',
+        disabled: !pending || shell.invalid || shell.saving,
+        onClick: () => { void form.save() },
+      },
+      shell.saving ? '保存中…' : '保存',
+    ),
+  )
+}
+
+/**
+ * Render one settings field.
+ * @param form - the form controller.
+ * @param spec - the field's declaration.
+ * @param shell - the card-wide projection.
+ * @param onBooleanToggle - notified when a `boolean` field flips (used by MCP).
+ * @returns the field row.
+ */
 function renderField(
   form: CardForm,
   spec: FieldSpec,
@@ -712,55 +282,14 @@ function renderField(
   onBooleanToggle?: (checked: boolean) => void,
 ): React.ReactElement {
   const state = form.fieldState(spec.field)
-  const disabled = !shell.writable
+  // Editing during a save would stage an edit the in-flight plan knows nothing
+  // about; lock the controls for the duration instead.
+  const disabled = !shell.writable || shell.saving
   const inputId = `dstav-${spec.field}`
   const inputClass = state.invalid ? 'dstav-input dstav-input-invalid' : 'dstav-input'
-
-  // The editable control differs by kind: text/number/textlist share an
-  // `<input>`, `select` gets a dropdown with an explicit "(未设置)" empty
-  // option, and `boolean` gets a checkbox whose draft is the string 'true'/'false'.
-  const control = spec.kind === 'select'
-    ? React.createElement('select', {
-      id: inputId,
-      className: inputClass,
-      ...(state.invalid ? { 'aria-invalid': true } : {}),
-      value: state.text,
-      disabled,
-      onChange: (event: React.ChangeEvent<HTMLSelectElement>) =>
-        form.edit(spec.field, event.target.value),
-    },
-    React.createElement('option', { value: '' }, '(未设置)'),
-    (spec.options ?? []).map(option =>
-      React.createElement('option', { key: option, value: option }, option)),
-    )
-    : spec.kind === 'boolean'
-    ? React.createElement('input', {
-      id: inputId,
-      className: 'dstav-checkbox',
-      type: 'checkbox',
-      checked: state.text === 'true',
-      disabled,
-      onChange: (event: React.ChangeEvent<HTMLInputElement>) => {
-        form.edit(spec.field, event.target.checked ? 'true' : 'false')
-        onBooleanToggle?.(event.target.checked)
-      },
-    })
-    : React.createElement('input', {
-      id: inputId,
-      className: inputClass,
-      type: 'text',
-      ...(spec.kind === 'number' ? { inputMode: 'numeric' as const } : {}),
-      ...(state.invalid ? { 'aria-invalid': true } : {}),
-      value: state.text,
-      placeholder: spec.placeholder ?? (spec.kind === 'number' ? '(未设置)' : ''),
-      disabled,
-      onChange: (event: React.ChangeEvent<HTMLInputElement>) =>
-        form.edit(spec.field, event.target.value),
-    })
-
   return React.createElement(
     'div',
-    { className: 'dstav-field' },
+    { className: 'dstav-field', key: spec.field },
     React.createElement(
       'div',
       { className: 'dstav-field-head' },
@@ -772,18 +301,13 @@ function renderField(
           React.createElement('span', { className: 'dstav-badge' }, 'overridden'),
           React.createElement(
             'button',
-            {
-              type: 'button',
-              className: 'dstav-reset',
-              disabled,
-              onClick: () => form.clear(spec.field),
-            },
+            { type: 'button', className: 'dstav-reset', disabled, onClick: () => form.clear(spec.field) },
             'reset',
           ),
         )
         : null,
     ),
-    control,
+    fieldControl(form, spec, state, inputId, inputClass, disabled, onBooleanToggle),
     React.createElement(
       'p',
       { className: state.invalid ? 'dstav-invalid' : 'dstav-hint' },
@@ -792,11 +316,81 @@ function renderField(
   )
 }
 
-/** The patch snippet the user pastes into their profile's cordis.patch.yml to
- * mount the Tavily remote MCP server. The URL carries a `<…>` placeholder —
- * a `!!js process.env.X` expression reads the shell env DSH was launched from,
- * which does NOT include `~/.dsh/.credentials.yaml`, so a static literal the
- * user fills in is the reliable form. */
+/**
+ * The editable control for one field.
+ *
+ * `text`/`number`/`textlist` share an `<input>`; `select` gets a dropdown whose
+ * empty option means "inherit the base layer"; `boolean` gets a checkbox whose
+ * draft text comes from the model.
+ * @param form - the form controller.
+ * @param spec - the field's declaration.
+ * @param state - the field's rendered state.
+ * @param inputId - the control's DOM id (also the label's `htmlFor`).
+ * @param inputClass - class for text-like controls.
+ * @param disabled - whether writes are impossible right now.
+ * @param onBooleanToggle - notified when a `boolean` field flips.
+ * @returns the control element.
+ */
+function fieldControl(
+  form: CardForm,
+  spec: FieldSpec,
+  state: ReturnType<CardForm['fieldState']>,
+  inputId: string,
+  inputClass: string,
+  disabled: boolean,
+  onBooleanToggle?: (checked: boolean) => void,
+): React.ReactElement {
+  if (spec.kind === 'select') {
+    return React.createElement(
+      'select',
+      {
+        id: inputId,
+        className: inputClass,
+        ...state.invalid ? { 'aria-invalid': true } : {},
+        value: state.text,
+        disabled,
+        onChange: (event: React.ChangeEvent<HTMLSelectElement>) => form.edit(spec.field, event.target.value),
+      },
+      React.createElement('option', { value: '' }, '(未设置)'),
+      (spec.options ?? []).map(option => React.createElement('option', { key: option, value: option }, option)),
+    )
+  }
+  if (spec.kind === 'boolean') {
+    return React.createElement('input', {
+      id: inputId,
+      className: 'dstav-checkbox',
+      type: 'checkbox',
+      checked: form.booleanField(spec.field) === true,
+      disabled,
+      onChange: (event: React.ChangeEvent<HTMLInputElement>) => {
+        form.edit(spec.field, booleanText(event.target.checked))
+        onBooleanToggle?.(event.target.checked)
+      },
+    })
+  }
+  return React.createElement('input', {
+    id: inputId,
+    className: inputClass,
+    type: 'text',
+    ...spec.kind === 'number' ? { inputMode: 'numeric' as const } : {},
+    ...state.invalid ? { 'aria-invalid': true } : {},
+    value: state.text,
+    placeholder: spec.placeholder ?? (spec.kind === 'number' ? '(未设置)' : ''),
+    disabled,
+    onChange: (event: React.ChangeEvent<HTMLInputElement>) => form.edit(spec.field, event.target.value),
+  })
+}
+
+/**
+ * The patch snippet to paste into a profile's `cordis.patch.yml` to mount the
+ * Tavily remote MCP server. The README's MCP section carries the same snippet —
+ * keep the two in step when either changes.
+ *
+ * The URL carries a `<…>` placeholder on purpose: a `!!js process.env.X`
+ * expression reads the shell environment DSH was launched from, which does NOT
+ * include `~/.dsh/.credentials.yaml`, so a literal the user fills in is the
+ * reliable form.
+ */
 const MCP_PATCH_SNIPPET = `- insert:
     - id: mcp-tavily
       name: '@deepseek-ai/dsh-mcp-client'
@@ -807,25 +401,30 @@ const MCP_PATCH_SNIPPET = `- insert:
         toolCallTimeoutMs: 60000
         failOnStartupError: false`
 
+/** Props of {@link McpPanel}. */
+interface McpPanelProps {
+  state: 'idle' | 'asking' | 'guide'
+  set: (next: 'idle' | 'asking' | 'guide') => void
+  form: CardForm
+}
+
 /**
- * The MCP hand-off confirmation panel, rendered under the `useMcp` toggle.
+ * The MCP hand-off guide under the `useMcp` toggle.
  *
- * Three states:
- * - 'asking': the user flipped the toggle on — ask whether the Tavily MCP
- *   server is already configured.
- * - 'guide': the user answered "not configured yet" — show the full patch
- *   snippet with a copy button and the paste-and-restart instructions.
- * - answered 'yes' (panel hidden): the normal save flow persists `useMcp: true`.
+ * Three states: 'asking' (the user flipped the toggle on), 'guide' (they
+ * answered "not configured yet" — show the snippet), and hidden once they
+ * confirm the server is already configured. It is a component, not a helper
+ * called from a branch, so it may legitimately own state (the copy feedback) and
+ * cannot become a conditional-hook bug later.
+ * @param props - panel state, its setter, and the form controller.
+ * @returns the panel, or `null` when it does not apply.
  */
-function mcpPanel(
-  state: 'idle' | 'asking' | 'guide',
-  set: (next: 'idle' | 'asking' | 'guide') => void,
-  form: CardForm,
-): React.ReactElement | null {
+function McpPanel({ state, set, form }: McpPanelProps): React.ReactElement | null {
+  const [copy, setCopy] = React.useState<'idle' | 'copied' | 'failed'>('idle')
   if (state === 'idle') return null
-  // The panel only makes sense while a `useMcp: true` draft is staged; a
-  // discard (or flipping the toggle back) collapses it.
-  if (form.stagedValue('useMcp') !== 'true') return null
+  // The panel only makes sense while a `useMcp: true` draft is staged; a discard
+  // (or flipping the toggle back) collapses it.
+  if (form.booleanField('useMcp') !== true) return null
 
   if (state === 'asking') {
     return React.createElement(
@@ -835,27 +434,20 @@ function mcpPanel(
       React.createElement(
         'div',
         { className: 'dstav-mcp-actions' },
-        React.createElement(
-          'button',
-          { type: 'button', className: 'dstav-mcp-yes', onClick: () => set('idle') },
-          '是，已配置',
-        ),
-        React.createElement(
-          'button',
-          { type: 'button', className: 'dstav-mcp-no', onClick: () => set('guide') },
-          '否，未配置',
-        ),
+        React.createElement('button', { type: 'button', className: 'dstav-mcp-yes', onClick: () => set('idle') }, '是，已配置'),
+        React.createElement('button', { type: 'button', className: 'dstav-mcp-no', onClick: () => set('guide') }, '否，未配置'),
       ),
     )
   }
 
+  const copyLabel = copy === 'copied' ? '已复制' : copy === 'failed' ? '复制失败,请手动选择' : '复制配置'
   return React.createElement(
     'div',
     { className: 'dstav-mcp-panel' },
     React.createElement(
       'p',
       { className: 'dstav-mcp-title' },
-      '尚未配置 Tavily MCP 服务器。将以下配置粘贴到 ~/.dsh/profiles/web/cordis.patch.yml，然后重启 DSH:',
+      '尚未配置 Tavily MCP 服务器。将以下配置粘贴到 ~/.dsh/profiles/web/cordis.patch.yml,然后重启 DSH:',
     ),
     React.createElement('pre', { className: 'dstav-mcp-snippet' }, MCP_PATCH_SNIPPET),
     React.createElement(
@@ -866,20 +458,22 @@ function mcpPanel(
         {
           type: 'button',
           className: 'dstav-mcp-copy',
-          onClick: () => { void navigator.clipboard?.writeText(MCP_PATCH_SNIPPET) },
+          onClick: () => {
+            // A clipboard write can reject (permission, non-secure origin), so
+            // report the outcome instead of silently doing nothing.
+            void navigator.clipboard?.writeText(MCP_PATCH_SNIPPET)
+              .then(() => setCopy('copied'), () => setCopy('failed'))
+          },
         },
-        '复制配置',
+        copyLabel,
       ),
-      React.createElement(
-        'button',
-        { type: 'button', className: 'dstav-mcp-back', onClick: () => set('asking') },
-        '返回',
-      ),
+      React.createElement('button', { type: 'button', className: 'dstav-mcp-back', onClick: () => set('asking') }, '返回'),
     ),
     React.createElement(
       'p',
       { className: 'dstav-mcp-note' },
-      '粘贴并重启后,模型会看到 mcp__tavily__tavily_search / tavily_extract / tavily_crawl / tavily_map 工具;本开关保存后,web_search 将让位给 MCP 搜索且不消耗 REST 配额。',
+      `粘贴并重启后,模型会看到 ${Object.values(TAVILY_MCP_TOOLS).join(' / ')} 工具;`
+      + '本开关保存后,web_search 将让位给 MCP 搜索且不消耗 REST 配额。',
     ),
   )
 }
@@ -904,7 +498,13 @@ function chevron(open: boolean): React.ReactElement {
   )
 }
 
-/** A read-only status card explaining why the editable form cannot be shown. */
+/**
+ * A read-only status card explaining why the editable form cannot be shown.
+ * @param title - the headline.
+ * @param body - what happened.
+ * @param remedy - optional next step.
+ * @returns the card element.
+ */
 function statusCard(title: string, body: string, remedy?: string): React.ReactElement {
   return React.createElement(
     'li',
@@ -914,9 +514,7 @@ function statusCard(title: string, body: string, remedy?: string): React.ReactEl
       { className: 'dstav-status' },
       React.createElement('p', { className: 'dstav-status-title' }, title),
       React.createElement('p', { className: 'dstav-status-body' }, body),
-      remedy === undefined
-        ? null
-        : React.createElement('p', { className: 'dstav-status-body' }, remedy),
+      remedy === undefined ? null : React.createElement('p', { className: 'dstav-status-body' }, remedy),
     ),
   )
 }
