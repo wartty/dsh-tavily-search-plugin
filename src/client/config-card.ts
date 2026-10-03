@@ -29,7 +29,7 @@ import React from 'react'
 import type { Context } from '@deepseek-ai/cordis'
 import { TAVILY_MCP_TOOLS, TAVILY_SETTINGS_NAMESPACE } from '../shared.ts'
 import { booleanText, CardForm, FIELDS } from './card-model.ts'
-import type { CardShell, FieldSpec } from './card-model.ts'
+import type { CardShell, CopyKey, FieldSpec } from './card-model.ts'
 import type { ConfigFormsLike, RemoteLike, TranslateLike } from './types.ts'
 
 /**
@@ -182,7 +182,11 @@ function summaryRow(form: CardForm, shell: CardShell, t: TranslateLike): React.R
   const key = form.keyState()
   const notes = [
     t('description'),
-    key.configured ? t('summary.secretSet') : t('summary.secretUnset'),
+    // The same honesty rule as the key badge: an unanswered read must not be
+    // reported as "no key configured".
+    key.unknown
+      ? t('summary.secretUnknown')
+      : key.configured ? t('summary.secretSet') : t('summary.secretUnset'),
     ...shell.dirty ? [t('summary.dirty')] : [],
     ...shell.failed ? [t('summary.failed')] : [],
     // `writable` is `false` in the host's initial snapshot (status 'loading'), so
@@ -260,7 +264,7 @@ function ConfigCard({ t, card, view }: ConfigCardProps): React.ReactElement {
         React.createElement('span', { className: 'dstav-description' }, t('description')),
       ),
       shell.dirty || key.dirty
-        ? React.createElement('span', { className: 'dstav-badge' }, t('badge.unsaved'))
+        ? React.createElement('span', { className: 'dstav-badge dstav-badge-info' }, t('badge.unsaved'))
         : null,
       chevron(open),
     ),
@@ -293,6 +297,48 @@ function ConfigCard({ t, card, view }: ConfigCardProps): React.ReactElement {
   )
 }
 
+/** The key plane's presentation state, derived once so label and tone cannot drift. */
+type KeyStatus = 'saving' | 'dirty' | 'unknown' | 'set' | 'unset'
+
+/**
+ * Which state the badge reports, most transient first: what the user is doing right
+ * now (`saving`, `dirty`) outranks what the host last said, and an unverified
+ * `unknown` outranks both known states because it must not be presented as a fact.
+ * @param key - the credential state.
+ * @returns the status.
+ */
+function keyStatus(key: ReturnType<CardForm['keyState']>): KeyStatus {
+  if (key.saving) return 'saving'
+  if (key.dirty) return 'dirty'
+  if (key.unknown) return 'unknown'
+  return key.configured ? 'set' : 'unset'
+}
+
+/** Copy key per status. */
+const STATUS_COPY: Record<KeyStatus, CopyKey> = {
+  saving: 'key.saving',
+  dirty: 'key.dirty',
+  unknown: 'key.unknown',
+  set: 'key.configured',
+  unset: 'key.unconfigured',
+}
+
+/**
+ * Tag tones per status, copied from the host's Tag primitive
+ * (`dsh-client-ui-primitives/lib/Tag.module.css`): a plugin may not import that
+ * package, so the palette rides the same `--dsw-alias-*` tokens instead. A
+ * configured key reads `success`; an unverified state reads `warning`, because the
+ * neutral grey is exactly what "off" looks like; a positively unset key stays
+ * `outline`; a pending edit is `info` and a save in flight is `quiet`.
+ */
+const STATUS_TONE: Record<KeyStatus, string> = {
+  saving: 'quiet',
+  dirty: 'info',
+  unknown: 'warning',
+  set: 'success',
+  unset: 'outline',
+}
+
 /** Props of {@link KeyField}. */
 interface KeyFieldProps {
   form: CardForm
@@ -321,14 +367,22 @@ function KeyField({ form, keyState: key, t }: KeyFieldProps): React.ReactElement
   // or two plugin entries) cannot collide on `id`/`htmlFor`.
   const inputId = React.useId()
   const hintId = React.useId()
-  const statusLabel = key.saving
-    ? t('key.saving')
-    : key.dirty
-      ? t('key.dirty')
-      : key.configured
-        ? t('key.configured')
-        : t('key.unconfigured')
-  const statusClass = key.configured || key.dirty || key.saving ? 'dstav-badge' : 'dstav-badge-muted'
+  const noteId = React.useId()
+  // The badge reports what is KNOWN: while a read has not answered (or failed) the
+  // state is unknown, and "not configured" there would assert something the host
+  // never said — see `CredentialState.unknown`. Label and tone come from one
+  // derived state so the two can never drift apart.
+  const status = keyStatus(key)
+  const statusLabel = t(STATUS_COPY[status])
+  const statusClass = `dstav-badge dstav-badge-${STATUS_TONE[status]}`
+  // A read-only reference is explained, not just greyed out: `writable: false`
+  // means the credentials domain refuses UI writes because another layer supplies
+  // the value (the docs name `env`, `file`, `project-env`, `user-env`), so the user
+  // needs to know which layer to change instead of retyping the key here.
+  const readOnly = !key.unknown && !key.writable
+  const readOnlyNote = readOnly
+    ? t('key.readOnlyNote', { source: sourceLabel(key.source, t) })
+    : undefined
   return React.createElement(
     'div',
     { className: 'dstav-field' },
@@ -348,10 +402,11 @@ function KeyField({ form, keyState: key, t }: KeyFieldProps): React.ReactElement
       type: 'password',
       autoComplete: 'off',
       placeholder: key.configured ? t('key.placeholder.replace') : t('key.placeholder.enter'),
-      disabled: !key.writable || key.saving,
+      disabled: readOnly || key.saving,
       value: key.staged,
-      // The hint is programmatically tied to the control, not just placed under it.
-      'aria-describedby': hintId,
+      // Every message about this control is programmatically tied to it, not merely
+      // placed under it; the read-only note joins the hint while it renders.
+      'aria-describedby': readOnly ? `${hintId} ${noteId}` : hintId,
       onChange: (event: React.ChangeEvent<HTMLInputElement>) => form.editKey(event.target.value),
     }),
     React.createElement(
@@ -359,7 +414,34 @@ function KeyField({ form, keyState: key, t }: KeyFieldProps): React.ReactElement
       { id: hintId, className: 'dstav-hint' },
       t('key.hint', { ref: key.ref }),
     ),
+    ...readOnlyNote === undefined ? [] : [React.createElement(
+      'p',
+      { id: noteId, className: 'dstav-read-only dstav-key-note', role: 'status' },
+      readOnlyNote,
+    )],
   )
+}
+
+/**
+ * Name the layer supplying a credential value.
+ *
+ * The credentials service calls `source` a provider-defined id and the local
+ * provider uses `env`, `file`, `project-env` and `user-env`; anything else is
+ * reported by id rather than guessed at.
+ * @param source - the provider-defined layer id, or undefined when unconfigured.
+ * @param t - namespace-bound translate.
+ * @returns human text for the layer.
+ */
+function sourceLabel(source: string | undefined, t: TranslateLike): string {
+  if (source === undefined) return t('key.source.unknown')
+  const known: Record<string, CopyKey> = {
+    'env': 'key.source.env',
+    'project-env': 'key.source.projectEnv',
+    'user-env': 'key.source.userEnv',
+    'file': 'key.source.file',
+  }
+  const key = known[source]
+  return key === undefined ? t('key.source.other', { source }) : t(key)
 }
 
 /**
@@ -461,7 +543,7 @@ function FieldRow({ form, spec, shell, t, onBooleanToggle }: FieldRowProps): Rea
         ? React.createElement(
           'span',
           { className: 'dstav-badges' },
-          React.createElement('span', { className: 'dstav-badge' }, t('badge.overridden')),
+          React.createElement('span', { className: 'dstav-badge dstav-badge-neutral' }, t('badge.overridden')),
           React.createElement(
             'button',
             { type: 'button', className: 'dstav-reset', disabled, onClick: () => form.clear(spec.field) },

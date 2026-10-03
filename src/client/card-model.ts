@@ -222,21 +222,38 @@ export interface CardShell {
 export interface CredentialState {
   /** Credential reference the key is stored under. */
   ref: string
-  /** The credentials domain has a value for this reference. */
+  /** The credentials domain has a value for this reference; meaningless while `unknown`. */
   configured: boolean
-  /** The domain accepts writes. */
+  /** Source layer supplying the value, when the host named one. */
+  source?: string
+  /** The domain accepts writes. Writes are refused while a read-only source shadows the reference. */
   writable: boolean
+  /**
+   * The host has not answered, or could not be asked, so `configured` is the last
+   * state that was KNOWN rather than a fact. The badge must not turn this into the
+   * claim "no key configured" — the credentials service documents that a read can
+   * fail, and an unverified "unconfigured" is exactly the assertion a key owner
+   * would misread as "my key is gone".
+   */
+  unknown: boolean
   /** Last staged literal; cleared once the write lands. */
   staged: string
   /** A non-empty literal is staged. */
   dirty: boolean
   saving: boolean
-  failed: boolean
 }
 
-/** The credential plane before the host has answered. */
+/** The credential plane before the host has answered anything. */
 function idleCredential(ref = TAVILY_API_KEY_ENV): CredentialState {
-  return { ref, configured: false, writable: true, staged: '', dirty: false, saving: false, failed: false }
+  return {
+    ref,
+    configured: false,
+    writable: true,
+    unknown: true,
+    staged: '',
+    dirty: false,
+    saving: false,
+  }
 }
 
 /** Remote event announcing that a credential reference changed. */
@@ -355,14 +372,14 @@ export class CardForm {
   /** Drop every staged edit without touching the host. */
   discard(): void {
     this.staged.clear()
-    this.credential = { ...this.credential, staged: '', dirty: false, failed: false }
+    this.credential = { ...this.credential, staged: '', dirty: false }
     this.failed = false
     this.publish()
   }
 
   /** API-key plane: stage the literal; the commit happens in `save()`. */
   editKey(text: string): void {
-    this.credential = { ...this.credential, staged: text, dirty: text.length > 0, failed: false }
+    this.credential = { ...this.credential, staged: text, dirty: text.length > 0 }
     this.publish()
   }
 
@@ -443,7 +460,9 @@ export class CardForm {
       await this.readCredential()
       return true
     } catch {
-      this.credential = { ...this.credential, failed: true }
+      // A refused write is the CARD's failure (it surfaces through `shell.failed`);
+      // it says nothing about what the host currently holds, so the read state and
+      // its `unknown` flag stay untouched.
       return false
     }
   }
@@ -451,8 +470,10 @@ export class CardForm {
   /**
    * Read the credential plane's state for the current reference.
    *
-   * A read failure is non-fatal — the card stays usable and the key control keeps
-   * reporting the last state it knew.
+   * A failed read is non-fatal AND must not become an assertion: the last known
+   * values are kept and `unknown` is raised, so the badge reports "state unknown"
+   * instead of claiming the reference is unconfigured. The credentials service
+   * documents that refusal (`ok: false`) and a missing entry are both possible.
    */
   private async readCredential(): Promise<void> {
     const ref = credentialRefIn(this.scope.getSnapshot())
@@ -461,23 +482,45 @@ export class CardForm {
       this.publish()
     }
 
+    /** Keep the last known facts, but stop presenting them as verified. */
+    const markUnknown = (): void => {
+      if (this.credential.unknown) return
+      this.credential = { ...this.credential, ref, unknown: true }
+      this.publish()
+    }
+
     let response: Awaited<ReturnType<RemoteLike['credentials']['describe']>>
     try {
       response = await this.remote.credentials.describe([ref])
     } catch {
+      markUnknown()
       return
     }
     // The reference may have moved while the read was in flight.
-    if (!response.ok || ref !== credentialRefIn(this.scope.getSnapshot())) return
+    if (ref !== credentialRefIn(this.scope.getSnapshot())) return
+    if (!response.ok) {
+      markUnknown()
+      return
+    }
 
     const view = response.value[ref]
     const next: CredentialState = {
       ...this.credential,
       ref,
       configured: view?.configured ?? false,
+      // Assigned rather than conditionally spread: an answer that omits the layer
+      // (unconfigured) must CLEAR a previously reported one, or a stale layer would
+      // keep explaining a read-only state that no longer applies.
+      source: view?.source,
       writable: view?.writable ?? true,
+      unknown: false,
     }
-    if (next.configured === this.credential.configured && next.writable === this.credential.writable) return
+    if (
+      next.configured === this.credential.configured
+      && next.writable === this.credential.writable
+      && next.source === this.credential.source
+      && !this.credential.unknown
+    ) return
     this.credential = next
     this.publish()
   }

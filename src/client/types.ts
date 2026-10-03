@@ -60,9 +60,17 @@ export interface ConfigFormsLike {
   whileServed(namespaces: readonly string[], register: () => void): () => void
 }
 
-/** One credential's state as the credentials domain reports it. */
+/** One credential's state as the credentials domain reports it (`CredentialInfo`). */
 export interface CredentialSummary {
+  /** The domain resolves this reference to a value (an empty stored value counts as absent). */
   configured: boolean
+  /**
+   * Source layer currently supplying the value; absent while unconfigured.
+   * Provider-defined: the local provider uses `env`, `file`, `project-env` and
+   * `user-env`. A read-only layer is why `writable` can be false.
+   */
+  source?: string
+  /** The domain accepts writes; a read-only source shadows the reference otherwise. */
   writable: boolean
 }
 

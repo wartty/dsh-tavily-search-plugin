@@ -401,6 +401,13 @@ pnpm dsh web
 └─────────────────────────────────────────────────┘
 ```
 
+API key 那一行的徽标是**三态**的,不是"配了/没配"两态:
+
+- **已配置 / 未配置** —— 凭证域明确回答过才有这两种说法;
+- **状态未知** —— 宿主还没回答、或这次读取失败(`ok: false` / 传输错误)时的说法。卡片不会把"没问到"讲成"未配置"(那会让你以为自己的 key 丢了);此时输入框仍可用,因为一次读不到并不能排除那次写入能成功。
+
+凭证引用被别的层遮蔽时(`writable: false`,例如值来自启动环境 `env`、凭证文件 `file`),输入框会禁用,并在下面写明是**哪一层**在供值(`source` 层 id:启动环境 / 项目环境 / 用户环境 / 凭证文件,未知 id 原样列出)。要改这个 key 就去那一层改——凭证域会拒绝从这里写入,因为那样的写入会"表面成功"而解析仍返回遮蔽层的值。
+
 ---
 
 ## 配置项 / Configuration
@@ -627,7 +634,7 @@ ctx.effect(() => ctx.configForms.whileServed([ENTRY_ID], () => {
 - **externals 只有 `react`** —— 浏览器只需要 React 本身,其他都内联。
 - **所有 `@deepseek-ai/*` 类型声明、React 组件依赖** 通过 `noExternal` 内联到 bundle。
 - **CJS 输出 + `__ModuleLoader__.load` 握手协议** —— 顶层 banner 注入 `window.__ModuleLoader__.load({id, factory: (require) => {...}})`,factory 内调 `apply(ctx)`。
-- **典型大小**:61.3 KB(gzip 19.4 KB;含 en/zh 双语文案表)。
+- **典型大小**:64.2 KB(gzip 20.4 KB;含 en/zh 双语文案表)。
 
 ### 不修改 DSH 的关键
 
@@ -929,11 +936,15 @@ TAVILY_API_KEY=tvly-... node scripts/smoke-test.mjs --live   # 额外打一次�
 - **卡片模型**:字段表与宿主 schema/词汇表一致、草稿校验与强转、以及用 stub 服务驱动的写入器 ——
   含「凭证域必须用位置参数调用 `remote.credentials`」「非法草稿整批拒绝(设置与凭证都不写)」
   「宿主接受但未落盘要判失败」「保存期间的新编辑不被吞掉」「并发保存只跑一次」「dispose 释放
-  scope 与 remote 订阅」这些回归用例。
+  scope 与 remote 订阅」这些回归用例,以及凭证三态 —— 「未应答/问不到 → `unknown`,不冒充
+  '未配置'」「reject 与 `ok: false` 都保留上次已知值」「应答省略 `source` 要清掉旧层」
+  「同值应答不重复 publish」「写入被拒不改动读取状态」。
 - **卡片视图**（`scripts/client-render-test.mjs`）:用 stub React + stub cordis 服务在 Node 里渲染
   `lib/client.js` —— 含「owner 的 `form` prop 不能顶掉注入的控制器(`card`)」「`view: 'summary'`
   渲染成功」「`t()` 全链路出中文」「`navigator.clipboard` 缺失时复制进失败态且重进 guide 复位」
-  「根元素不是 `li`」「`label`/`aria-describedby` 程序化关联且双卡片 id 不撞」这些回归用例。
+  「根元素不是 `li`」「`label`/`aria-describedby` 程序化关联且双卡片 id 不撞」这些回归用例,
+  以及「未应答时徽标/summary 说'状态未知'而非'未配置'」「已知只读 → 重读失败要撤下只读解释并
+  解除禁用」「只读解释写明来源层并接进 `aria-describedby`(en/zh 都走 locale)」。
 
 纯逻辑都以具名导出留出了边界:加断言既不需要起 DSH,也不需要浏览器;视图层断言只需要构建产物。
 
@@ -971,7 +982,7 @@ TAVILY_API_KEY=tvly-... node scripts/smoke-test.mjs --live   # 额外打一次�
   ```
   客户端 bundle 不走 dts emit(`dts: false`),不受这个坑影响。
 
-- **典型产物大小**:host `lib/index.js` 21.0 KB(gzip 7.6 KB)+ `lib/index.d.ts` 18.3 KB,client `lib/client.js` 61.3 KB(gzip 19.4 KB),全在 DSH `<plugins>` 静态服务允许范围内。
+- **典型产物大小**:host `lib/index.js` 21.0 KB(gzip 7.6 KB)+ `lib/index.d.ts` 18.3 KB,client `lib/client.js` 64.2 KB(gzip 20.4 KB),全在 DSH `<plugins>` 静态服务允许范围内。
 
 - **`@deepseek-ai/dsh-*` peer deps 标 `*`** —— 这意味着不锁版本,跟当前 DSH 一起发版就行。如果改用新 DSH 后 host 类型报错,先 `pnpm install` 让 pnpm 拉取 workspace 中最新的 DSH 包,再 `pnpm build`。
 

@@ -68,6 +68,9 @@ const CARD_CSS = `
   margin: 0; padding-top: 12px;
   font-size: 12px; line-height: 1.5;
 }
+/* The same note inside a field row: the column's own gap spaces it, so it must not
+   carry the card-level note's top padding. */
+.dstav-key-note { padding-top: 0; }
 /* The one-line row the Plugin Manager shows inside its plugin list. */
 .dstav-summary {
   color: var(--dsw-alias-label-tertiary);
@@ -124,20 +127,39 @@ const CARD_CSS = `
   align-items: center; gap: 8px;
   display: inline-flex;
 }
+/* Capsule geometry and tones copied from the host's Tag primitive
+   (dsh-client-ui-primitives/lib/Tag.module.css) under our own class prefix: a
+   plugin may not import that package, so the palette is reproduced with the very
+   same --dsw-alias-* tokens. The previous single "prominent" style used
+   bg-module-platform, which is the primitive's NEUTRAL tone — i.e. the faintest
+   chip it ships, which is why it read as grey. */
 .dstav-badge {
+  display: inline-flex; align-items: center;
   white-space: nowrap;
-  background: var(--dsw-alias-bg-module-platform);
-  color: var(--dsw-alias-label-secondary);
   border-radius: 999px;
   padding: 1px 8px;
   font-size: 11px; font-weight: 500; line-height: 17px;
 }
-.dstav-badge-muted {
-  white-space: nowrap;
+.dstav-badge-success {
+  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent);
+  color: var(--dsw-alias-state-success-primary);
+}
+.dstav-badge-info {
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, transparent);
+  color: var(--dsw-alias-state-business-primary);
+}
+.dstav-badge-warning {
+  background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent);
+  color: var(--dsw-alias-state-warn-primary);
+}
+.dstav-badge-outline {
+  border: .5px solid var(--dsw-alias-border-l4);
   color: var(--dsw-alias-label-tertiary);
-  border-radius: 999px;
-  padding: 1px 8px;
-  font-size: 11px; line-height: 17px;
+}
+.dstav-badge-quiet { color: var(--dsw-alias-label-tertiary); }
+.dstav-badge-neutral {
+  background: var(--dsw-alias-bg-module-platform);
+  color: var(--dsw-alias-label-secondary);
 }
 .dstav-reset {
   font: inherit;

@@ -270,8 +270,16 @@ const DEFAULTS = Object.freeze({
  * @param locale 初始语言。
  * @param snapshot 初始配置快照（F6 用它伪造 loading / 只读）。
  * @param services 传 false 模拟设置服务缺失的 profile。
+ * @param credential 凭证域的应答剧本：`{ configured, writable, source? }` 成功应答、
+ *   `'reject'` 传输层拒绝、`'ok-false'` 领域拒绝、`'pending'` 永不回答。
+ *   可在两次读取之间改写 `harness.state.credential`，再用 `harness.invalidate()` 触发重读。
  */
-function createHarness({ locale = 'zh', snapshot: snapshotOverrides = {}, services = true } = {}) {
+function createHarness({
+  locale = 'zh',
+  snapshot: snapshotOverrides = {},
+  services = true,
+  credential = { configured: true, writable: true },
+} = {}) {
   const state = {
     registrations: [],
     warnings: [],
@@ -280,6 +288,9 @@ function createHarness({ locale = 'zh', snapshot: snapshotOverrides = {}, servic
     setCalls: [],
     locale,
     credentialWrites: [],
+    credential,
+    describeCalls: 0,
+    credentialEvents: [],
   }
   const snapshot = {
     status: 'ready',
@@ -315,9 +326,31 @@ function createHarness({ locale = 'zh', snapshot: snapshotOverrides = {}, servic
     },
   }
   const remote = {
-    $on() { return () => {} },
+    $on(event, listener) {
+      if (event === 'credentials/reference-updated') state.credentialEvents.push(listener)
+      return () => {
+        state.credentialEvents = state.credentialEvents.filter(entry => entry !== listener)
+      }
+    },
     credentials: {
-      async describe(refs) { return { ok: true, value: { [refs[0]]: { configured: true, writable: true } } } },
+      async describe(refs) {
+        state.describeCalls++
+        const spec = state.credential
+        if (spec === 'pending') return new Promise(() => {})
+        if (spec === 'reject') throw new Error('credentials unavailable')
+        if (spec === 'ok-false') return { ok: false, value: {} }
+        return {
+          ok: true,
+          value: {
+            [refs[0]]: {
+              configured: spec.configured,
+              writable: spec.writable,
+              // 省掉 source 才是"应答里没有这个字段"，传 undefined 也一样。
+              ...spec.source === undefined ? {} : { source: spec.source },
+            },
+          },
+        }
+      },
       async set(ref, value) { state.credentialWrites.push([ref, value]) },
     },
   }
@@ -360,7 +393,15 @@ function createHarness({ locale = 'zh', snapshot: snapshotOverrides = {}, servic
     },
   }
 
-  return { ctx, state, snapshot, publish, registration: name => state.registrations.find(entry => entry.options.name === name) }
+  return {
+    ctx,
+    state,
+    snapshot,
+    publish,
+    registration: name => state.registrations.find(entry => entry.options.name === name),
+    /** 触发 `credentials/reference-updated`，让卡片重读凭证状态（宿主事件路径）。 */
+    invalidate: (ref = 'TAVILY_API_KEY') => { for (const listener of [...state.credentialEvents]) listener(ref) },
+  }
 }
 
 /** 宿主合并顺序：`...kit, ...injected, ...slotInjected.props, ...ownerProps`（owner 胜出）。 */
@@ -371,6 +412,32 @@ function controlForLabel(tree, labelText) {
   const label = findAll(tree, node => node.type === 'label' && textOf(node).trim() === labelText)[0]
   if (label === undefined) return undefined
   return findAll(tree, node => node.props?.id === label.props?.htmlFor)[0]
+}
+
+/**
+ * 拆开 `aria-describedby`（它可以是空格分隔的 id 列表）并把每个 id 数一遍。
+ * @returns `[{ id, nodes }]`，`nodes` 为该 id 在文档里的节点数。
+ */
+function describedByIds(tree, control) {
+  const described = control?.props?.['aria-describedby']
+  if (typeof described !== 'string' || described.length === 0) return []
+  return described.split(/\s+/).filter(Boolean).map(id => ({
+    id,
+    nodes: findAll(tree, node => node.props?.id === id),
+  }))
+}
+
+/** API-key 那一行（`KeyField`），断言只在这行内部找控件/提示/只读解释。 */
+function keyFieldOf(tree) {
+  const label = findAll(tree, node => node.type === 'label' && textOf(node).trim() === 'API key')[0]
+  const input = label === undefined ? undefined : findAll(tree, node => node.props?.id === label.props?.htmlFor)[0]
+  const field = input === undefined ? undefined : findAll(tree, node => (
+    classList(node).includes('dstav-field')
+    && (node.children ?? []).some(child => isElement(child) && child.props?.id === input.props.id)
+  ))[0]
+  const children = field?.children ?? []
+  const pick = name => children.find(child => isElement(child) && classList(child).includes(name))
+  return { label, input, field, hint: pick('dstav-hint'), note: pick('dstav-read-only') }
 }
 
 const click = node => node.props?.onClick?.({})
@@ -507,9 +574,8 @@ check(
 )
 check(
   controls.every(control => {
-    const described = control.props['aria-describedby']
-    if (typeof described !== 'string' || described.length === 0) return false
-    return findAll(ariaTree, node => node.props?.id === described).length === 1
+    const ids = describedByIds(ariaTree, control)
+    return ids.length > 0 && ids.every(entry => entry.nodes.length === 1)
   }),
   'F8: 每个控件都用 aria-describedby 指向唯一的提示/非法文案节点',
 )
@@ -536,7 +602,162 @@ loadingHarness.snapshot.status = 'ready'
 loadingHarness.publish()
 check(loadingView.text.includes('只读') === true, 'F6: status=ready 且不可写时 summary 才追加"只读"')
 
-// ---- 12) 服务缺失：注册分支不抛错、不注册 ----
+// ---- 12) F3：凭证三态 —— "没问到 / 问不到" 不得冒充 "未配置" ----
+
+/** 注册并挂一张展开的 page 卡片；`settle` 时先等首次凭证读取落地。 */
+async function mountPage(harness, { settle = true } = {}) {
+  clientModule.apply(harness.ctx)
+  if (settle) await flushMicrotasks()
+  const registration = harness.registration('plugins.item')
+  return expand(react.mount(registration.component, mergeProps(registration, { view: 'page' })))
+}
+
+/** 注册并挂一行 summary（凭证读取先落地）。 */
+async function mountSummary(harness) {
+  clientModule.apply(harness.ctx)
+  await flushMicrotasks()
+  const registration = harness.registration('plugins.item')
+  return react.mount(registration.component, mergeProps(registration, { view: 'summary' }))
+}
+
+// 宿主一直没有回答（describe 永不 settle）：unknown，而不是"未配置"。
+const pendingHarness = createHarness({ locale: 'zh', credential: 'pending' })
+const pendingView = await mountPage(pendingHarness)
+const pendingKey = keyFieldOf(pendingView.tree)
+check(
+  pendingView.text.includes('状态未知') && pendingView.text.includes('未配置') === false,
+  'F3: 未应答时 key 徽标显示"状态未知"，不出现"未配置"',
+)
+check(pendingKey.input?.props.disabled === false, 'F3: 状态未知时 key 输入框仍可用（不阻断一次无法排除的尝试）')
+// 色调取自宿主 Tag 原语：unknown 是 warning（琥珀），不是灰底 neutral。
+check(
+  byClass(pendingView.tree, 'dstav-badge-warning').length === 1
+  && byClass(pendingView.tree, 'dstav-badge-success').length === 0,
+  'F3: 未应答徽标走宿主 Tag 的 warning 色调（不再是灰底 neutral）',
+)
+const knownSetPage = await mountPage(createHarness({ locale: 'zh', credential: { configured: true, writable: true } }))
+check(
+  byClass(knownSetPage.tree, 'dstav-badge-success').length === 1
+  && byClass(knownSetPage.tree, 'dstav-badge-warning').length === 0,
+  'F3: 已配置徽标走 success 色调',
+)
+const knownUnsetPage = await mountPage(createHarness({ locale: 'zh', credential: { configured: false, writable: true } }))
+check(
+  byClass(knownUnsetPage.tree, 'dstav-badge-outline').length === 1,
+  'F3: 明确未配置徽标走 outline 色调（有描边、无填充）',
+)
+
+const pendingSummary = await mountSummary(createHarness({ locale: 'zh', credential: 'pending' }))
+check(
+  pendingSummary.text.includes('密钥状态未知') && pendingSummary.text.includes('密钥未配置') === false,
+  'F3: summary 未应答时显示"密钥状态未知"，不含"密钥未配置"',
+)
+
+const knownSetSummary = await mountSummary(createHarness({ locale: 'zh', credential: { configured: true, writable: true } }))
+check(
+  knownSetSummary.text.includes('密钥已配置') && knownSetSummary.text.includes('密钥状态未知') === false,
+  'F3: 明确应答已配置 → summary 显示"密钥已配置"',
+)
+const knownUnsetSummary = await mountSummary(createHarness({ locale: 'zh', credential: { configured: false, writable: true } }))
+check(
+  knownUnsetSummary.text.includes('密钥未配置') && knownUnsetSummary.text.includes('密钥状态未知') === false,
+  'F3: 明确应答未配置 → summary 显示"密钥未配置"（与 unknown 区分开）',
+)
+
+const pendingEnglish = await mountSummary(createHarness({ locale: 'en', credential: 'pending' }))
+check(pendingEnglish.text.includes('key state unknown'), 'F3: en 语言下未应答的 summary 是英文（key state unknown）')
+const pendingEnglishPage = await mountPage(createHarness({ locale: 'en', credential: 'pending' }))
+check(
+  pendingEnglishPage.text.includes('state unknown') && pendingEnglishPage.text.includes('not configured') === false,
+  'F3: en 语言下未应答的徽标是英文（state unknown）',
+)
+
+// ---- 13) F7：只读引用说出是哪一层在遮蔽 ----
+
+const readOnlyHarness = createHarness({ locale: 'zh', credential: { configured: true, writable: false, source: 'env' } })
+const readOnlyView = await mountPage(readOnlyHarness)
+const readOnlyKey = keyFieldOf(readOnlyView.tree)
+check(readOnlyKey.input?.props.disabled === true, 'F7: 只读引用（env）禁用 key 输入框')
+check(
+  readOnlyKey.note !== undefined && textOf(readOnlyKey.note).includes('启动环境'),
+  'F7: 只读时渲染出来源层解释（env → 启动环境）',
+)
+const readOnlyDescribed = describedByIds(readOnlyView.tree, readOnlyKey.input)
+check(
+  readOnlyDescribed.length === 2
+  && readOnlyDescribed.every(entry => entry.nodes.length === 1)
+  && readOnlyDescribed.some(entry => entry.id === readOnlyKey.hint?.props.id)
+  && readOnlyDescribed.some(entry => entry.id === readOnlyKey.note?.props.id),
+  'F7: 只读解释的 id 与 hint id 同时出现在 aria-describedby 里',
+)
+
+const weirdSource = await mountPage(createHarness({ locale: 'zh', credential: { configured: true, writable: false, source: 'weird-layer' } }))
+const weirdNote = keyFieldOf(weirdSource.tree).note
+check(
+  weirdNote !== undefined && textOf(weirdNote).includes('外层来源(weird-layer)'),
+  'F7: 未知 source → 按 id 回落到"外层来源(weird-layer)"',
+)
+
+const noSource = await mountPage(createHarness({ locale: 'zh', credential: { configured: true, writable: false } }))
+const noSourceNote = keyFieldOf(noSource.tree).note
+check(
+  noSourceNote !== undefined
+  && textOf(noSourceNote).includes('另一层')
+  && textOf(noSourceNote).includes('{source}') === false,
+  'F7: source 缺失但只读 → 用"另一层"兜底（不出现未替换的 {source}）',
+)
+
+const writableWithSource = await mountPage(createHarness({ locale: 'zh', credential: { configured: true, writable: true, source: 'env' } }))
+const writableKey = keyFieldOf(writableWithSource.tree)
+const writableDescribed = describedByIds(writableWithSource.tree, writableKey.input)
+check(
+  writableKey.note === undefined
+  && writableDescribed.length === 1
+  && writableDescribed[0].id === writableKey.hint?.props.id,
+  'F7: 可写且带 source → 不渲染只读解释，aria-describedby 只有 hint 一个 id',
+)
+
+// 宿主事件把状态从"问不到"变成"已知只读"时，视图要跟着补上解释并禁用输入框。
+const liveHarness = createHarness({ locale: 'zh', credential: 'reject' })
+const liveView = await mountPage(liveHarness)
+const liveBefore = keyFieldOf(liveView.tree)
+check(
+  liveBefore.note === undefined && liveBefore.input?.props.disabled === false,
+  'F7: 读取失败（unknown）时不渲染只读解释，输入框仍可用',
+)
+liveHarness.state.credential = { configured: true, writable: false, source: 'env' }
+liveHarness.invalidate()
+await flushMicrotasks()
+const liveAfter = keyFieldOf(liveView.tree)
+check(
+  liveAfter.note !== undefined
+  && textOf(liveAfter.note).includes('启动环境')
+  && liveAfter.input?.props.disabled === true,
+  'F7: 凭证事件把 unknown 变为只读已知后，视图补上解释并禁用输入框',
+)
+
+const readOnlyEnglish = await mountPage(createHarness({ locale: 'en', credential: { configured: true, writable: false, source: 'env' } }))
+const readOnlyEnglishNote = keyFieldOf(readOnlyEnglish.tree).note
+check(
+  readOnlyEnglishNote !== undefined && textOf(readOnlyEnglishNote).includes('the launch environment'),
+  'F7: en 语言下只读解释是英文（走 locale 而非硬编码）',
+)
+
+// 已知只读 → 重读失败：旧事实不再被当作事实，必须撤下解释、解除禁用。
+const staleReadOnly = createHarness({ locale: 'zh', credential: { configured: true, writable: false, source: 'env' } })
+const staleView = await mountPage(staleReadOnly)
+staleReadOnly.state.credential = 'reject'
+staleReadOnly.invalidate()
+await flushMicrotasks()
+const staleKey = keyFieldOf(staleView.tree)
+check(
+  staleKey.note === undefined
+  && staleKey.input?.props.disabled === false
+  && staleView.text.includes('状态未知'),
+  'F7: 已知只读后读取失败 → 回到"状态未知"、撤下只读解释并解除禁用（旧事实不再锁死界面）',
+)
+
+// ---- 14) 服务缺失：注册分支不抛错、不注册 ----
 
 const emptyHarness = createHarness({ services: false })
 noThrow(() => clientModule.apply(emptyHarness.ctx), 'configForms/remote 缺失时 apply 不抛错')

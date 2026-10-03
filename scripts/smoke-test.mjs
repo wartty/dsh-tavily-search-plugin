@@ -15,7 +15,9 @@
  *   7. 字段表与宿主 schema/词汇表是单一事实源（选项数组是同一引用），字段只存
  *      文案 key，且每个 key 在 en/zh 两张字典里都非空（字典 key 集合逐一对应）；
  *   8. 草稿校验与强转规则；
- *   9. `CardForm` 的写入器 —— 用 stub 服务驱动，回归"凭证域挂错服务"那类事故。
+ *   9. `CardForm` 的写入器 —— 用 stub 服务驱动，回归"凭证域挂错服务"那类事故；
+ *  10. 凭证三态（`unknown`）与来源层（`source`）—— "没问到/问不到"不得冒充"未配置"，
+ *      只读引用要能说出是哪一层在遮蔽。
  *
  * 运行前提：先 `pnpm run build`。加 `--live` 且环境里有 TAVILY_API_KEY 时，
  * 额外打一次真实请求验证端到端（会消耗 1 个 Tavily credit），默认不跑。
@@ -454,16 +456,204 @@ await tick()
 refusedCredentialForm.editKey('tvly-y')
 await refusedCredentialForm.save()
 check(refusedCredentialForm.shell().failed === true && refusedCredentialForm.keyState().staged === 'tvly-y', '凭证写入被拒时保留草稿并标记失败')
+check(
+  refusedCredentialForm.keyState().unknown === false && refusedCredentialForm.keyState().configured === true,
+  '凭证写入被拒不改动 unknown/configured(拒绝只说明卡片层面的失败)',
+)
 refusedCredentialForm.dispose()
 
 const readFail = harness({ failDescribe: true })
 const readFailForm = new CardForm(readFail.scope, readFail.remote)
 await tick()
 check(readFailForm.keyState().configured === false, '凭证读取失败不致命,卡片仍可用')
+check(readFailForm.keyState().unknown === true, '凭证读取失败标 unknown,而不是宣称"未配置"')
 readFailForm.edit('topic', 'news')
 await readFailForm.save()
 check(JSON.stringify(readFail.state.writes) === '[["topic","news"]]', '凭证平面故障不影响设置写入')
 readFailForm.dispose()
+
+// ---- 10) 凭证三态(unknown)与来源层(source) ----
+// 依据 reference/subsystems/credentials.md:`describe(ref)` 回答
+// `{ configured, source?, writable }`,本地提供方把由启动环境/凭证文件等只读层供值的
+// 引用报告为 `writable:false`;`source` 是 provider 定义的层 id。因此卡片必须把
+// "还没问到 / 问不到"与"问到了且没有值"分开,并在只读时说出是哪一层在遮蔽。
+
+/**
+ * 凭证平面的脚本化替身:每次 `describe` 按顺序消费一条剧本,用完后重复最后一条。
+ * 剧本条目:
+ *   `{ configured, writable, source? }` 成功应答(省略 source = 应答里没有该字段)
+ *   `{ ok: false }`                    领域拒绝(应答 ok=false)
+ *   `{ reject: true }`                 传输层 reject
+ *   `{ pending: true }`                永不回答
+ * 另外记录 `credentials/reference-updated` 监听器,便于 `invalidate()` 触发重读。
+ */
+function credentialPlane({ script = [], failSet = false } = {}) {
+  const state = { describes: 0, setCalls: [], events: [], snapshotPublishes: 0 }
+  const snapshot = { status: 'ready', value: { apiKeyEnv: 'TAVILY_API_KEY' }, user: {}, writable: true }
+  const listeners = new Set()
+  const scope = {
+    getSnapshot: () => snapshot,
+    subscribe: (listener) => { listeners.add(listener); return () => { listeners.delete(listener) } },
+    set: async (field, value) => { snapshot.user = { ...snapshot.user, [field]: value } },
+    unset: async (field) => {
+      const next = { ...snapshot.user }
+      delete next[field]
+      snapshot.user = next
+    },
+  }
+  const remote = {
+    $on: (event, listener) => {
+      if (event === 'credentials/reference-updated') state.events.push(listener)
+      return () => {}
+    },
+    credentials: {
+      describe: async (refs) => {
+        const index = state.describes++
+        const entry = script[Math.min(index, script.length - 1)] ?? { configured: false, writable: true }
+        if (entry.pending === true) return new Promise(() => {})
+        if (entry.reject === true) throw new Error('credentials unavailable')
+        if (entry.ok === false) return { ok: false, value: {} }
+        return {
+          ok: true,
+          value: {
+            [refs[0]]: {
+              configured: entry.configured,
+              writable: entry.writable,
+              ...entry.source === undefined ? {} : { source: entry.source },
+            },
+          },
+        }
+      },
+      set: async (ref, value) => {
+        state.setCalls.push([ref, value])
+        if (failSet) throw new Error('write refused')
+      },
+    },
+  }
+  return {
+    scope,
+    remote,
+    snapshot,
+    state,
+    invalidate: (ref = 'TAVILY_API_KEY') => { for (const listener of [...state.events]) listener(ref) },
+  }
+}
+
+/** 断言一条凭证状态,输出够诊断的差异。 */
+function sameCredential(actual, expected) {
+  return actual.unknown === expected.unknown
+    && actual.configured === expected.configured
+    && actual.writable === expected.writable
+    && actual.source === expected.source
+}
+
+// 10.1 宿主未应答:unknown 为真,且不能把初始的 configured:false 当事实
+const unanswered = credentialPlane({ script: [{ pending: true }] })
+const unansweredForm = new CardForm(unanswered.scope, unanswered.remote)
+check(unansweredForm.keyState().unknown === true, '宿主未应答时 keyState().unknown 为真(首帧不宣称"未配置")')
+await tick()
+check(unansweredForm.keyState().unknown === true && unansweredForm.keyState().configured === false, '等待应答期间保持 unknown,configured 只是"上次已知"')
+unansweredForm.dispose()
+
+// 10.2 describe reject:保留上次已知值,只把 unknown 置真
+const rejected = credentialPlane({
+  script: [{ configured: true, writable: false, source: 'env' }, { reject: true }],
+})
+const rejectedForm = new CardForm(rejected.scope, rejected.remote)
+await tick()
+check(
+  sameCredential(rejectedForm.keyState(), { unknown: false, configured: true, writable: false, source: 'env' }),
+  '成功应答写入 configured/writable/source 且 unknown=false',
+)
+rejected.invalidate()
+await tick()
+check(
+  sameCredential(rejectedForm.keyState(), { unknown: true, configured: true, writable: false, source: 'env' }),
+  'describe reject → unknown=true 且保留上次已知的 configured/writable/source',
+)
+rejectedForm.dispose()
+
+// 10.3 应答 ok:false:与 reject 同样进入 unknown,不回落成"未配置"
+const notOk = credentialPlane({
+  script: [{ configured: true, writable: true, source: 'file' }, { ok: false }],
+})
+const notOkForm = new CardForm(notOk.scope, notOk.remote)
+await tick()
+notOk.invalidate()
+await tick()
+check(
+  sameCredential(notOkForm.keyState(), { unknown: true, configured: true, writable: true, source: 'file' }),
+  'describe 返回 ok:false → unknown=true 且保留上次已知值',
+)
+notOkForm.dispose()
+
+// 10.4 成功应答省略 source:必须清掉上一次报告的层,不能残留
+const layerCleared = credentialPlane({
+  script: [{ configured: true, writable: false, source: 'env' }, { configured: false, writable: true }],
+})
+const layerClearedForm = new CardForm(layerCleared.scope, layerCleared.remote)
+await tick()
+check(layerClearedForm.keyState().source === 'env', '首次应答报告 source=env')
+layerCleared.invalidate()
+await tick()
+check(
+  sameCredential(layerClearedForm.keyState(), { unknown: false, configured: false, writable: true, source: undefined }),
+  '应答省略 source → 清掉旧层(source=undefined)且 unknown=false',
+)
+layerClearedForm.dispose()
+
+// 10.5 同值重复应答不触发多余 publish;值真变了才 publish
+const steady = credentialPlane({
+  script: [
+    { configured: true, writable: false, source: 'env' },
+    { configured: true, writable: false, source: 'env' },
+    { configured: true, writable: true, source: 'user-env' },
+  ],
+})
+const steadyForm = new CardForm(steady.scope, steady.remote)
+await tick()
+let credentialPublishes = 0
+steadyForm.subscribe(() => { credentialPublishes++ })
+steady.invalidate()
+await tick()
+check(credentialPublishes === 0 && steadyForm.keyState().unknown === false, '同值重复应答不触发多余 publish')
+steady.invalidate()
+await tick()
+check(
+  credentialPublishes === 1
+  && sameCredential(steadyForm.keyState(), { unknown: false, configured: true, writable: true, source: 'user-env' }),
+  '值真的变化时 publish 一次并带上新 source',
+)
+steadyForm.dispose()
+
+// 10.6 凭证写入成功、随后的重读失败:写入仍算成功,但状态变 unknown
+const writeThenFail = credentialPlane({
+  script: [{ configured: false, writable: true }, { reject: true }],
+})
+const writeThenFailForm = new CardForm(writeThenFail.scope, writeThenFail.remote)
+await tick()
+check(writeThenFailForm.keyState().unknown === false, '写入前先有已知状态')
+writeThenFailForm.editKey('tvly-x')
+await writeThenFailForm.save()
+check(writeThenFail.state.setCalls.length === 1 && writeThenFail.state.setCalls[0][1] === 'tvly-x', '凭证写入发出')
+check(writeThenFailForm.shell().failed === false, '写入成功但重读失败 → save 不算失败')
+check(
+  writeThenFailForm.keyState().unknown === true && writeThenFailForm.keyState().staged === '',
+  '重读失败 → unknown=true(不宣称"未配置"),草稿仍按写入已落盘清空',
+)
+writeThenFailForm.dispose()
+
+// 10.7 凭证写入被拒:卡片级 failed 负责呈现,凭证读取状态不被这次拒绝改动
+// (已知状态下的拒绝在 §9 的 refusedCredentialForm 上断言;这里补 unknown 状态。)
+const refusedWhileUnknown = credentialPlane({ script: [{ pending: true }], failSet: true })
+const refusedWhileUnknownForm = new CardForm(refusedWhileUnknown.scope, refusedWhileUnknown.remote)
+refusedWhileUnknownForm.editKey('tvly-z')
+await refusedWhileUnknownForm.save()
+check(
+  refusedWhileUnknownForm.shell().failed === true && refusedWhileUnknownForm.keyState().unknown === true,
+  'unknown 状态下凭证写入被拒 → shell.failed 为真,unknown 保持为真',
+)
+refusedWhileUnknownForm.dispose()
 
 if (failed > 0) { console.error(`\n${failed} 项检查未通过`); process.exit(1) }
 console.log('\n全部通过')
