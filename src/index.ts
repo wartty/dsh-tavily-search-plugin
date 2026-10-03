@@ -20,7 +20,7 @@
  */
 
 import { WebError } from '@deepseek-ai/dsh-web'
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
 import type { WebSearchProvider, WebSearchRequest, WebSearchResult, WebSearchSource } from '@deepseek-ai/dsh-web'
 import z from '@deepseek-ai/schemastery'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
@@ -103,10 +103,12 @@ const USER_AGENT = `deepseek-harness-tavily/${packageJson.version}`
 const YYYY_MM_DD = /^\d{4}-\d{2}-\d{2}$/
 
 /**
- * Plugin config. Fields stay optional to the *composition*: the paired schema
- * below carries every default, so the value `apply` receives — and the settings
- * section the card edits — is always fully resolved. A deployment changes any of
- * these from `cordis.patch.yml` or the card without touching this file.
+ * Plugin config. Every field is a **Volatile reference**: DSH 0.2.0 projects
+ * exactly the volatile fields into the plugin's configuration form (plain fields
+ * are excluded from it), and a committed edit updates these references in place
+ * through `loader/volatile-update` WITHOUT re-running `apply` — so an operation
+ * reads `.get()` when it starts instead of capturing a value (cookbook: live
+ * configuration forms).
  * @typedef {Object} Config
  * @property {string} [apiKey] Literal Tavily API key; prefer `apiKeyEnv`.
  * @property {string} [apiKeyEnv] Credential reference; defaults to `TAVILY_API_KEY`.
@@ -128,6 +130,29 @@ const YYYY_MM_DD = /^\d{4}-\d{2}-\d{2}$/
  *   searching, so no REST credits are spent.
  */
 export interface Config {
+  apiKey: Volatile<string | undefined>
+  apiKeyEnv: Volatile<string>
+  baseURL: Volatile<string>
+  searchDepth: Volatile<TavilySearchDepth>
+  maxResults: Volatile<number>
+  includeAnswer: Volatile<boolean>
+  topic: Volatile<TavilyTopic>
+  days: Volatile<number>
+  timeRange: Volatile<TavilyTimeRange | undefined>
+  startDate: Volatile<string | undefined>
+  endDate: Volatile<string | undefined>
+  includeDomains: Volatile<string[]>
+  excludeDomains: Volatile<string[]>
+  chunksPerSource: Volatile<number>
+  snippetMaxChars: Volatile<number>
+  useMcp: Volatile<boolean>
+}
+
+/**
+ * The values behind {@link Config}'s references, read once per operation. The
+ * helpers below stay plain so `pnpm test` drives them without a volatile runtime.
+ */
+export interface PlainConfig {
   apiKey?: string
   apiKeyEnv?: string
   baseURL?: string
@@ -139,39 +164,74 @@ export interface Config {
   timeRange?: TavilyTimeRange
   startDate?: string
   endDate?: string
-  includeDomains?: string[]
-  excludeDomains?: string[]
+  includeDomains?: readonly string[]
+  excludeDomains?: readonly string[]
   chunksPerSource?: number
   snippetMaxChars?: number
   useMcp?: boolean
 }
 
 /**
- * Runtime validator paired with {@link Config}. The schema is authoritative for
- * every default: the settings provider resolves sections through it, so the
- * card, the user document layer and the per-search projection all read one set
- * of values. Constraints belong here too — an invalid one fails the load loudly
+ * Runtime validator paired with {@link Config}. Every field is `.volatile()` so
+ * the settings service projects it into the form the user edits — a plain field
+ * never reaches that form. The schema is authoritative for defaults and
+ * constraints: an invalid value fails the load loudly
  * (`$.maxResults expected number <= 20 but got 99`) instead of surfacing as a
  * puzzling search later.
+ *
+ * Deliberately NOT annotated `z<Config>`: a volatile schema takes plain values in
+ * and hands volatile references out, so its inferred type is the honest one and
+ * `apply`'s `Config` parameter is the shape those references present.
  */
-export const Config: z<Config> = z.object({
-  apiKey: z.string().role('secret'),
-  apiKeyEnv: z.string().role('credential-ref').default(TAVILY_API_KEY_ENV),
-  baseURL: z.string().default(TAVILY_DEFAULT_BASE_URL),
-  searchDepth: z.union([...TAVILY_SEARCH_DEPTHS]).default(TAVILY_DEFAULT_SEARCH_DEPTH),
-  maxResults: z.number().step(1).min(1).max(TAVILY_MAX_RESULTS_CEILING).default(TAVILY_DEFAULT_MAX_RESULTS),
-  includeAnswer: z.boolean().default(TAVILY_DEFAULT_INCLUDE_ANSWER),
-  topic: z.union([...TAVILY_TOPICS]).default(TAVILY_DEFAULT_TOPIC),
-  days: z.number().step(1).min(0).default(TAVILY_DEFAULT_DAYS),
-  timeRange: z.union([...TAVILY_TIME_RANGES]),
-  startDate: z.string().pattern(YYYY_MM_DD),
-  endDate: z.string().pattern(YYYY_MM_DD),
-  includeDomains: z.array(z.string()).default([]),
-  excludeDomains: z.array(z.string()).default([]),
-  chunksPerSource: z.number().step(1).min(1).max(3).default(TAVILY_DEFAULT_CHUNKS_PER_SOURCE),
-  snippetMaxChars: z.number().step(1).min(16).default(TAVILY_DEFAULT_SNIPPET_MAX_CHARS),
-  useMcp: z.boolean().default(false),
+export const Config = z.object({
+  apiKey: z.string().role('secret').volatile(),
+  apiKeyEnv: z.string().role('credential-ref').default(TAVILY_API_KEY_ENV).volatile(),
+  baseURL: z.string().default(TAVILY_DEFAULT_BASE_URL).volatile(),
+  searchDepth: z.union([...TAVILY_SEARCH_DEPTHS]).default(TAVILY_DEFAULT_SEARCH_DEPTH).volatile(),
+  maxResults: z.number().step(1).min(1).max(TAVILY_MAX_RESULTS_CEILING).default(TAVILY_DEFAULT_MAX_RESULTS).volatile(),
+  includeAnswer: z.boolean().default(TAVILY_DEFAULT_INCLUDE_ANSWER).volatile(),
+  topic: z.union([...TAVILY_TOPICS]).default(TAVILY_DEFAULT_TOPIC).volatile(),
+  days: z.number().step(1).min(0).default(TAVILY_DEFAULT_DAYS).volatile(),
+  timeRange: z.union([...TAVILY_TIME_RANGES]).volatile(),
+  startDate: z.string().pattern(YYYY_MM_DD).volatile(),
+  endDate: z.string().pattern(YYYY_MM_DD).volatile(),
+  includeDomains: z.array(z.string()).default([]).volatile(),
+  excludeDomains: z.array(z.string()).default([]).volatile(),
+  chunksPerSource: z.number().step(1).min(1).max(3).default(TAVILY_DEFAULT_CHUNKS_PER_SOURCE).volatile(),
+  snippetMaxChars: z.number().step(1).min(16).default(TAVILY_DEFAULT_SNIPPET_MAX_CHARS).volatile(),
+  useMcp: z.boolean().default(false).volatile(),
 })
+
+/**
+ * Read every volatile reference once.
+ *
+ * This is what makes a form edit take effect without a reload: the loader
+ * rewrites the references and emits `loader/volatile-update`, and the next search
+ * sees the new values. Reading them in one place also keeps one operation on a
+ * single consistent snapshot.
+ * @param config - this activation's config references.
+ * @returns the plain values behind them.
+ */
+export function readConfig(config: Config): PlainConfig {
+  return {
+    apiKey: config.apiKey.get(),
+    apiKeyEnv: config.apiKeyEnv.get(),
+    baseURL: config.baseURL.get(),
+    searchDepth: config.searchDepth.get(),
+    maxResults: config.maxResults.get(),
+    includeAnswer: config.includeAnswer.get(),
+    topic: config.topic.get(),
+    days: config.days.get(),
+    timeRange: config.timeRange.get(),
+    startDate: config.startDate.get(),
+    endDate: config.endDate.get(),
+    includeDomains: config.includeDomains.get(),
+    excludeDomains: config.excludeDomains.get(),
+    chunksPerSource: config.chunksPerSource.get(),
+    snippetMaxChars: config.snippetMaxChars.get(),
+    useMcp: config.useMcp.get(),
+  }
+}
 
 /**
  * What one search runs with: the section projected into the shape the request
@@ -182,7 +242,7 @@ export const Config: z<Config> = z.object({
  * provider never re-checks for missing configuration.
  */
 export interface TavilySearchProviderOptions
-  extends Required<Omit<Config, 'apiKey' | 'timeRange' | 'startDate' | 'endDate'>> {
+  extends Required<Omit<PlainConfig, 'apiKey' | 'timeRange' | 'startDate' | 'endDate'>> {
   /** Literal key from the section, when one was configured. */
   apiKey?: string
   timeRange?: TavilyTimeRange
@@ -199,7 +259,7 @@ export interface TavilySearchProviderOptions
  * @param config - the currently authoritative section.
  * @returns total options for one search.
  */
-export function toProviderOptions(config: Config): TavilySearchProviderOptions {
+export function toProviderOptions(config: PlainConfig): TavilySearchProviderOptions {
   return {
     ...config.apiKey !== undefined && config.apiKey.length > 0 ? { apiKey: config.apiKey } : {},
     apiKeyEnv: config.apiKeyEnv ?? TAVILY_API_KEY_ENV,
@@ -244,12 +304,18 @@ function credentialResolver(ctx: Context, apiKeyEnv: string): () => Promise<stri
  * @param config - the currently authoritative section.
  * @returns options for one search.
  */
-function resolveOptions(ctx: Context, config: Config): TavilySearchProviderOptions {
+function resolveOptions(ctx: Context, config: PlainConfig): TavilySearchProviderOptions {
   const options = toProviderOptions(config)
   return { ...options, resolveApiKey: credentialResolver(ctx, options.apiKeyEnv) }
 }
 
-/** One Tavily search request body (`POST {baseURL}/search`). */
+/**
+ * One Tavily search request body (`POST {baseURL}/search`).
+ *
+ * The domain lists are `readonly` because they arrive from volatile references,
+ * whose array values are frozen snapshots (skill: "对象/数组是冻结快照"); the body
+ * is only serialized, never mutated.
+ */
 export interface TavilySearchBody {
   query: string
   topic: TavilyTopic
@@ -259,8 +325,8 @@ export interface TavilySearchBody {
   days?: number
   start_date?: string
   end_date?: string
-  include_domains?: string[]
-  exclude_domains?: string[]
+  include_domains?: readonly string[]
+  exclude_domains?: readonly string[]
   chunks_per_source: number
   include_answer: boolean
   include_raw_content: false
@@ -499,43 +565,28 @@ async function readErrorMessage(response: Response): Promise<string> {
   }
 }
 
-/** Register the Tavily search provider and the settings section it reads. */
+/** Register the Tavily search provider. */
 export function apply(ctx: Context, config: Config): void {
-  // DSH ≥ 0.1.5 hands the section's source as a THUNK (`() => T`): keep a level
-  // of indirection and re-read it per search, so a committed settings change
-  // takes effect without re-registering the provider.
-  let current: () => Config = () => config
-  // DSH ≥ 0.1.5 dropped the free `installSettingsSection` helper: the section now
-  // installs through the `settings` service, injected at call level so the
-  // provider still registers — falling back to the composition entry — when the
-  // settings service is absent. `config` is already resolved through the schema,
-  // so it is a complete base layer.
-  ctx.inject(['settings'], (settingsCtx) => {
-    settingsCtx.settings.installSection(ctx, TAVILY_SETTINGS_NAMESPACE, Config, config, {
-      validate: value => validateSection(value),
-      setSource: (source: () => Config) => {
-        current = source
-      },
-      // The registration carries no resolved value: the provider projects the
-      // section per search, so a committed change needs no re-registration.
-      onChange: () => {},
-    })
-  })
-  ctx.web.registerSearchProvider(new TavilySearchProvider(() => resolveOptions(ctx, current())))
+  // DSH 0.2.0 keeps a plugin's live values in the Volatile references its schema
+  // declares (`.volatile()`), and a form edit rewrites those references IN PLACE
+  // — the loader emits `loader/volatile-update` rather than re-running `apply`.
+  // The provider therefore reads them through `readConfig()` at the start of every
+  // search, which is exactly what makes an edit take effect without a restart.
+  // Constraints the schema cannot express are checked at activation, so a bad
+  // composition refuses loudly instead of surfacing later as a puzzling search.
+  validateSection(readConfig(config))
+  ctx.web.registerSearchProvider(
+    new TavilySearchProvider(() => resolveOptions(ctx, readConfig(config))),
+  )
 }
 
 /**
- * Refuse a section write the schema cannot express.
- *
- * These constraints run at the WRITE, not on the next search: a relative
- * endpoint or an inverted date window is a mistake the card should report while
- * it is being made. The settings provider calls this on registration and on
- * every `scope.set`/`scope.unset`, and keeps the last good section when a stored
- * document fails it.
- * @param value - the resolved section about to be committed.
+ * Refuse a config the schema cannot judge: `baseURL` must be an absolute URL, and
+ * a `startDate`/`endDate` pair must not be inverted.
+ * @param value - the resolved config this activation received.
  * @throws {Error} when `baseURL` is not absolute or the date window is inverted.
  */
-export function validateSection(value: Config): void {
+export function validateSection(value: PlainConfig): void {
   if (value.baseURL !== undefined && !isValidBaseUrl(value.baseURL)) {
     throw new Error(
       `${TAVILY_SETTINGS_NAMESPACE}: baseURL must be an absolute URL (got ${JSON.stringify(value.baseURL)})`,

@@ -12,7 +12,8 @@
     },
     "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
   },
   "files": [
     "lib/index.js",
@@ -21,7 +22,10 @@
     "lib/index.d.ts",
     "cordis.patch.yml",
     "README.md",
-    "scripts/smoke-test.mjs"
+    "scripts/smoke-test.mjs",
+    "scripts/client-render-test.mjs",
+    "icon.svg",
+    "locale/*.json"
   ],
   "dsh": {
     "bundle": {
@@ -30,15 +34,15 @@
     "client": {
       "platform": "web",
       "inject": [
-        "@deepseek-ai/dsh-client-ui-settings-plugins",
         "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager",
         "@deepseek-ai/dsh-api-remotes"
       ]
     }
   },
   "scripts": {
     "build": "tsdown",
-    "test": "pnpm run build && node scripts/smoke-test.mjs",
+    "test": "pnpm run build && node scripts/smoke-test.mjs && node scripts/client-render-test.mjs",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf lib",
     "check": "node --check src/index.ts 2>/dev/null; tsc --noEmit",
@@ -54,23 +58,22 @@
   ],
   "license": "MIT",
   "peerDependencies": {
-    "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/dsh-credentials": "*",
-    "@deepseek-ai/dsh-web": "*",
-    "@deepseek-ai/dsh-launch-environment": "*",
-    "@deepseek-ai/dsh-settings": "*",
-    "@deepseek-ai/schemastery": "*"
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/dsh-credentials": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-web": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-launch-environment": "^0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.4"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/dsh-credentials": "*",
-    "@deepseek-ai/dsh-web": "*",
-    "@deepseek-ai/dsh-launch-environment": "*",
-    "@deepseek-ai/dsh-settings": "*",
-    "@deepseek-ai/schemastery": "*",
+    "@deepseek-ai/cordis": "4.0.4",
+    "@deepseek-ai/dsh-credentials": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-web": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-launch-environment": "0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "3.18.4",
     "@types/react": "~18.3.1",
     "react": "^18.2.0",
     "tsdown": "^0.22.0",
-    "typescript": "^5.4.0"
-  }
+    "typescript": "^5.9.0"
+  },
+  "icon": "./icon.svg"
 }

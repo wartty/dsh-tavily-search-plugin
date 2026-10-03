@@ -23,7 +23,20 @@ Wires [Tavily](https://tavily.com) into DeepSeek Harness's `web_search` tool as 
 
 DeepSeek Harness 自带的 `web_search` 工具默认走 DeepSeek 自己的搜索后端。**本插件把后端换成 [Tavily](https://tavily.com)** —— 一个给 AI agent 设计、支持 `include_answer` 自然语言总结、有免费额度、按搜索次数计费的搜索 API。
 
-实现路径:写一个 Cordis 插件,向 `ctx.web.registerSearchProvider(...)` 注册 `TavilySearchProvider`;同时在浏览器半里向「设置 → 插件」页面贡献一张可编辑卡片,免去手动改 YAML。**全程不修改 DeepSeek Harness 任何源码**。
+实现路径:写一个 Cordis 插件,向 `ctx.web.registerSearchProvider(...)` 注册 `TavilySearchProvider`。**全程不修改 DeepSeek Harness 任何源码**。
+
+> ### ⚠️ DSH 版本适配(0.2.0-rc.2 起)
+>
+> DSH 0.2.0 重做了设置模型,本插件随之调整:
+>
+> - **配置表单不再由插件安装**。`SettingsForms` 从每个 profile 条目自己的 `Config` schema **自动派生**表单,key 就是**条目 id**(本插件是 `web-search-tavily`)——插件不再调用 `installSection`,也没有 `setSource`/`validate` 钩子。
+> - **`~/.dsh/settings.yaml` 已不存在**:DSH 启动时把它的节迁移进 profile patch 文档(`~/.dsh/profiles/web/cordis.patch.yml`)。配置改动写回该文档后,DSH 重放配置(`app-boot/config-reload`)并重新激活对应条目,所以改配置**不需要重启进程**,但 `apply` 会以新配置再跑一次。
+> - **浏览器端已移植到新插槽**:0.2.0 删掉了 `ctx.settingsScope` 与 `settings.plugin.item`,取而代之的是 **`ctx.configForms`**(按 profile 条目 id 取到的配置表单,`getSnapshot/subscribe/set/unset` 与旧 scope 同形)+ **`settings.plugins.tab`**(「设置 → 内置插件」页的列表插槽,单个贡献直接渲染成整页)。本插件的卡片按官方 `dsh-client-ui-settings-web-search` 页面同款模式移植:同一个组件服务两个界面,`plugins.item`(Plugin Manager 部署,列表行 + 面板两种视图)也一并注册,并只在宿主服务该条目时才注册(`configForms.whileServed`)。**入口是设置 → 内置插件**;文案走 `ctx.locale` 的 en/zh 字典。
+> - **配置字段必须是 `.volatile()`**（官方 cookbook "live configuration forms"）：0.2.0 只把 **volatile** 字段投影成插件配置表单，普通字段被排除。本插件 `Config` 每个字段都写成 `z…default(x).volatile()` / `z.string().volatile()`，`apply` 里用 `readConfig(config)` 逐字段 `.get()` 读取 —— 表单提交后 loader 只**原地更新这些引用**并发 `loader/volatile-update`，**不会重跑 `apply`**。漏掉 `.volatile()` 的后果：该条目在设置里**没有表单** → `configForms.whileServed` 不成立 → 配置页标签根本不会注册（本插件踩过这个坑）。
+> - **配置页入口**：「设置 → 内置插件」（`settings.plugins.tab` 插槽，单个贡献会直接渲染成页面）。另一个 `plugins.item` 插槽属于 **Plugin Manager**（随包发布但默认禁用的行），本插件也一并注册，哪个界面存在就在哪个里出现。
+> - **0.1.5 ~ 0.1.x 的旧模型**(`installSection` + `settingsScope` 卡片 + `settings.yaml`)在下面标注「历史」的章节里仍保留说明,便于对照。
+
+---
 
 | 对比项 | 内置 DeepSeek 搜索 | 本插件 (Tavily) |
 |--------|-------------------|-----------------|
@@ -522,45 +535,36 @@ pnpm dsh web
 
 ### 双面插件机制
 
-DSH 0.1.0-rc.5+ 的插件系统允许一个 npm 包同时承担两种角色:
+DSH 的插件系统允许一个 npm 包同时承担 Host 与 Client 两种角色。**0.2.0 起本插件只交付 Host 半**:
 
-| 角色 | 入口 | 加载时机 | 作用 |
-|------|------|----------|------|
-| **Host 半** | `lib/index.js` 导出 `apply(ctx, config)` | DSH 服务端冷启动,`cordis loader` 加载 | 注册 provider、安装 settings namespace |
-| **Client 半** | `lib/client.js` 通过 `window.__ModuleLoader__.load` 加载 | 浏览器渲染「插件」标签页前 | 向 `settings.plugin.item` 插槽注入 UI 卡片 |
+| 角色 | 入口 | 加载时机 | 作用 | 本仓库状态 |
+|------|------|----------|------|-----------|
+| **Host 半** | `lib/index.js` 导出 `apply(ctx, config)` | DSH 启动时由 `cordis loader` 加载 | 注册 provider;每次搜索读 volatile 引用 | ✅ 使用中 |
+| **Client 半** | `lib/client.js`(`window.__ModuleLoader__.load`) | 浏览器加载客户端模块时 | 向 `settings.plugins.tab`(设置 → 内置插件)与 `plugins.item`(Plugin Manager)注册配置页 | ✅ 使用中 |
 
-两边通过 `settings` 服务通信:host 半用 `ctx.settings.installSection(...)` 声明一个 namespace,client 半通过 `ctx.settingsScope.bind({namespace})` 读 / 写同一个 namespace。
+配置的读写由 DSH 自己完成:0.2.0 的 `SettingsForms` 从本插件的 `Config` schema 生成本条目的表单(只有 `.volatile()` 字段进入表单),提交后 loader 原地更新 volatile 引用并发 `loader/volatile-update` —— **不重挂插件**,host 半每次搜索直接读这些引用。
 
 ### Host 半(`src/index.ts`)
 
 ```ts
-// 默认值写在 schema 里(官方约定):settings 服务的 resolved 值 =
-// schema(mergeLayers(base, 用户层)),所以默认值进 schema 就等于同时
-// 进了卡片显示、用户文档层与搜索请求,不存在第二份默认值。
+// 默认值写在 schema 里(官方约定):表单、用户层与请求体都从同一份
+// schema 解析结果取值,不存在第二份默认值。
 export const Config: z<Config> = z.object({
   maxResults: z.number().step(1).min(1).max(20).default(TAVILY_DEFAULT_MAX_RESULTS),
   // …其余字段同理
 })
 
 export function apply(ctx: Context, config: Config): void {
-  // DSH ≥ 0.1.5 把节的来源作为 thunk 交给插件:每次搜索重新读取,
-  // 卡片改完立刻生效,无需重新注册 provider。
-  let current: () => Config = () => config
-
-  // 装 settings 命名空间 → UI 卡片可以编辑它。`config` 已经过 schema
-  // 解析(默认值齐备),它本身就是完整的 base 层。
-  ctx.inject(['settings'], (settingsCtx) => {
-    settingsCtx.settings.installSection(ctx, TAVILY_SETTINGS_NAMESPACE, Config, config, {
-      // schema 表达不了的约束:写入即拒,而不是等到下次搜索才报错
-      validate: value => validateSection(value),
-      setSource: (source) => { current = source },
-      onChange: () => {},
-    })
-  })
+  // 0.2.0:表单由 DSH 从上面的 schema 自动派生,插件不再安装 settings 节,
+  // 也没有 setSource/validate 钩子。配置改动 → profile patch 文档 →
+  // DSH 重放配置 → 本函数以新 config 再跑一次,所以这里直接用激活时的
+  // config 即可,不需要每次搜索去读某个"节"。
+  // schema 表达不了的约束改为在激活时拒绝(fail loudly),而不是留到搜索时才炸。
+  validateSection(config)
 
   // 注册 provider 到 web seam
   ctx.web.registerSearchProvider(
-    new TavilySearchProvider(() => resolveOptions(ctx, current()))
+    new TavilySearchProvider(() => resolveOptions(ctx, config))
   )
 }
 ```
@@ -586,22 +590,36 @@ export function apply(ctx: Context, config: Config): void {
 4. **解析响应**:`payload.answer` → `content`(模型引用的自然语言总结),`payload.results[]` → 标准化为 `{url, title, snippet}`;无 URL 的结果直接丢弃(seam 契约要求 source 必有 URL),`snippet` 按 `snippetMaxChars`(默认 600 字)截断防污染上下文。
 5. **错误映射**:HTTP 非 2xx → `WEB_PROVIDER_ERROR`,abort → `WEB_ABORTED`,未配 key → `WEB_PROVIDER_ERROR` with detail。
 
-### Client 半(`src/client/`)
+### Client 半(`src/client/`) —— ✅ 已按 0.2.0 移植
+
+> 下面这段代码已从 0.1.x 的 `settingsScope` + `settings.plugin.item` 移植到 0.2.0 的 `ctx.configForms` + `settings.plugins.tab` / `plugins.item`,读法仍然适用:模型在 `card-model.ts`,`configForms.get(条目id)` 提供 `getSnapshot/subscribe/set/unset`(与旧 scope 同形),文案在 `locales.ts`(经 `ctx.locale` 取词)。
 
 ```ts
 // src/client/index.ts
-export const inject = ['slots']
+export const inject = ['slots', 'locale', 'configForms', 'remote', 'remote.credentials']
 
 export function apply(ctx: ClientContext): void {
   injectStyles()                            // 注入主题化的 .dstav-* CSS
-  registerConfigCard(ctx)                   // 注册卡片到 settings.plugin.item 插槽
+  ctx.effect(() => ctx.locale.register(NS, { en, zh }), 'tavily: dictionaries')
+  registerConfigCard(ctx)                   // 注册配置页(内置插件页 + Plugin Manager)
 }
 
-// 关键:keyed slot 必须用 key: 不是 id:
-ctx.slots.register(
-  { name: 'settings.plugin.item', key: NAMESPACE, order: 30, label: NAMESPACE },
-  () => React.createElement(ConfigCard, { form }),
-)
+// src/client/config-card.ts —— 一个组件同时服务两个界面,表单按 profile 条目 id 取:
+const form = new CardForm(ctx.configForms.get(ENTRY_ID), ctx.get('remote'))
+ctx.effect(() => ctx.configForms.whileServed([ENTRY_ID], () => {
+  // 「设置 → 内置插件」:插槽用空 props 渲染,所以 view 由 inject face 自己声明
+  ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register(
+    { name: 'settings.plugins.tab', id: ENTRY_ID, order: 40, label: () => t('title'),
+      locale: NS, inject: () => ({ form, view: 'page', t }) },
+    ConfigCard,
+  ))
+  // Plugin Manager 部署:同一个组件再渲染「列表行 + 面板」两种视图
+  ctx.slots.inject('plugins.item', () => ctx.slots.register(
+    { name: 'plugins.item', id: ENTRY_ID, order: 40, label: () => t('title'),
+      locale: NS, inject: () => ({ form, t }) },
+    ConfigCard,
+  ))
+}), 'tavily: config page')
 ```
 
 `client.js` bundle 的构建特殊性:
@@ -609,14 +627,14 @@ ctx.slots.register(
 - **externals 只有 `react`** —— 浏览器只需要 React 本身,其他都内联。
 - **所有 `@deepseek-ai/*` 类型声明、React 组件依赖** 通过 `noExternal` 内联到 bundle。
 - **CJS 输出 + `__ModuleLoader__.load` 握手协议** —— 顶层 banner 注入 `window.__ModuleLoader__.load({id, factory: (require) => {...}})`,factory 内调 `apply(ctx)`。
-- **典型大小**:26 KB(gzip 8 KB)。
+- **典型大小**:61.3 KB(gzip 19.4 KB;含 en/zh 双语文案表)。
 
 ### 不修改 DSH 的关键
 
 | 风险点 | 怎么避开的 |
 |--------|-----------|
 | `ui-settings-plugins` 内部组件变了 → 卡片崩 | 卡片 UI 是手写的最小复刻,**不 import** `@deepseek-ai/dsh-client-ui-settings-plugins` 任何模块 |
-| 客户端 host API 变了 | 卡片只用 `ctx.settingsScope` 这个由 DSH 公共包暴露的服务;不依赖 DSH 内部 API |
+| 客户端 host API 变了 | 卡片只用 DSH 公共包暴露的服务(`ctx.slots` / `ctx.locale` / `ctx.configForms` / `ctx.remote`),并统一经自建最小接口面 `src/client/types.ts` 引用;不 import 任何 `@deepseek-ai/dsh-client-*` 包 |
 | Vite manifest hash 变了 | client bundle 是独立 CJS,不走 Vite 解析 |
 | DSH 重命名 / 移除 namespace | settings namespace 用插件名 + 命名空间前缀(`web-search-tavily`),DSH 0.1.0-rc.8+ 开放所有 namespace 到 UI |
 | monorepo purity gate | client bundle 的所有 DSH 内部依赖全部 `noExternal` 内联,独立构建通过 |
@@ -646,7 +664,7 @@ A:**DSH ≥ 0.1.1 会**,只要插件名出现在 `~/.dsh/profiles/web/package.js
 **DSH < 0.1.1 不会自动合入** —— 那时还没有 `dsh.profile.bundles`,外部插件通过 `pnpm add` 装进 profile 后,DSH 不会读插件自带的 `cordis.patch.yml`,必须手动把 patch 内容追加到 `~/.dsh/profiles/web/cordis.patch.yml`。这是已知 footgun,见 [§ 安装流程 / Installation](#安装流程--installation) 与 [故障排查](#搜索走了-deepseek-而不是-tavily)。
 
 ### Q:可以用本插件的 host 半但用自己写的 UI 卡片吗?
-A:可以,host 半 (`src/index.ts` → `lib/index.js`) 完全独立。`installSection` 安装的 `web-search-tavily` namespace 是公共的,任何 client 半插件都可以 `ctx.settingsScope.bind({namespace: 'web-search-tavily'})` 读取并编辑它。
+A:可以,host 半 (`src/index.ts` → `lib/index.js`) 完全独立。0.2.0 的配置读取走 `ctx.configForms.get(条目id)`(`web-search-tavily` 就是条目 id),`getSnapshot/subscribe/set/unset` 与旧 scope 同形,所以任何 client 半插件都能拿同一份表单读写它;条目 id 必须与 profile 里那一行的 id 一致。
 
 ### Q:`maxResults` 卡片写 10,Tavily 会扣几次配额?
 A:**一次**。`max_results` 是单次请求里的结果数,Tavily 按 **search 调用次数**计费,不是按返回的结果数。所以 `maxResults: 20` 和 `maxResults: 3` 在配额消耗上没区别。
@@ -716,28 +734,23 @@ A:**一次**。`max_results` 是单次请求里的结果数,Tavily 按 **search 
   pnpm dsh web
   ```
 
-### 启动时报 `keyed slot "settings.plugin.item" requires options.key`
+### 设置里看不到 Tavily 的配置页
 
-`settings.plugin.item` 是 `kind: 'keyed'` 的插槽(slot 定义在 `packages/client/ui-settings-plugins/src/client/slot-contract.ts`),`ctx.slots.register(...)` **必须**带 `key:` 字段(namespace 字符串),**不能**用 `id:`。
+按顺序检查(0.2.0 下最常见的四个成因):
 
-正确写法:
-```ts
-ctx.slots.register(
-  { name: 'settings.plugin.item', key: 'web-search-tavily', order: 30 },
-  ConfigCard,
-)
-```
+1. **`Config` 字段有没有 `.volatile()`?** DSH 只把 volatile 字段投影成表单;一个都没有 → 该条目**没有表单** → 命名空间不进入浏览器的共享镜像 → `configForms.whileServed(...)` 永不成立 → 标签根本不会注册。本插件 16 个字段全是 `.volatile()`(见 `src/index.ts`)。
+2. **条目被服务了吗?** 插件必须出现在 profile 的 `dsh.profile.bundles` 里;客户端半还要求 `package.json` 声明 `dsh.client`。
+   ```bash
+   grep -A6 '"bundles"' ~/.dsh/profiles/web/package.json
+   ```
+3. **注册到哪个插槽?** 「设置 → 内置插件」页声明的是 **`settings.plugins.tab`**(列表插槽,单个贡献会直接渲染成整页);**`plugins.item`** 属于 Plugin Manager(随包发布但默认禁用的行)。两个都注册,两种部署才都能出现。
+4. **客户端服务齐了吗?** 客户端半的 `inject` 必须包含 `slots`/`locale`/`configForms`/`remote`/`remote.credentials`;缺任何一个(例如 profile 没挂设置界面)会让整个客户端 fiber 静默 PENDING,页面上什么都不显示。
 
-错误写法:
-```ts
-ctx.slots.register(
-  { name: 'settings.plugin.item', id: 'web-search-tavily', order: 30 },
-  ConfigCard,
-)
-// 启动错误: keyed slot "settings.plugin.item" requires options.key
-```
+### 配置页能打开,但改了不生效
 
-参考 `packages/client/ui-settings-plugins/src/client/index.ts:146` 的官方注册方式。
+1. **是 `.get()` 现读,还是激活时快照?** volatile 引用由 loader **原地更新**,`apply` **不会**重跑 —— 每次操作都要 `readConfig(config)` 重新 `.get()`,缓存住的值永远是旧的。
+2. **保存报错了吗?** 写入是 revision fenced 的:并发改动会让本次保存被拒(卡片会显示"保存未全部生效"并保留草稿),重新保存即可。
+3. **是不是只改了 YAML?** 手改 `cordis.patch.yml` 需要重启进程;界面里保存才是即时的。
 
 ### 搜索走了 DeepSeek 而不是 Tavily
 
@@ -846,15 +859,17 @@ dsh-tavily-search-plugin/
 │   │                         #   词汇表(searchDepth/topic/timeRange)、MCP 工具 id、让位文案
 │   ├── index.ts             # ── HOST 半 ──
 │   │                         #   apply(ctx, config) → ctx.web.registerSearchProvider(...)
-│   │                         #              + installSection("web-search-tavily", ...)
+│   │                         #              + validateSection(config) + registerSearchProvider(...)
 │   └── client/              # ── CLIENT 半 ──
-│       ├── index.ts         #   apply(ctx) → 注入样式 + 注册卡片(inject 四个服务)
-│       ├── config-card.ts   #   视图:渲染卡片、转发事件(不含模型逻辑)
-│       ├── card-model.ts    #   模型:字段表、草稿规则、staged 写入器(无 React,可被测试驱动)
-│       ├── types.ts         #   ctx.slots / ctx.settingsScope / ctx.remote 最小类型面
+│       ├── index.ts         #   apply(ctx) → 注册 en/zh 字典 + 注入样式 + 注册卡片(inject 五个服务)
+│       ├── config-card.ts   #   视图:渲染卡片、转发事件(不含模型逻辑;文案一律 t(key) 取词)
+│       ├── card-model.ts    #   模型:字段表(只存文案 key)、草稿规则、staged 写入器(无 React,可被测试驱动)
+│       ├── locales.ts       #   字典:en/zh 扁平 key → 文案,经 ctx.locale 注册
+│       ├── types.ts         #   ctx.slots / ctx.configForms / ctx.locale / ctx.remote 最小类型面
 │       └── styles.ts        #   一次性 CSS 注入(按模块 id 认领标签 + DOM 守卫)
 ├── scripts/
-│   └── smoke-test.mjs       # 无宿主冒烟测试(`pnpm test`;`--live` 加打一次真实请求)
+│   ├── smoke-test.mjs       # 无宿主冒烟测试(`pnpm test`;`--live` 加打一次真实请求)
+│   └── client-render-test.mjs # 视图层渲染回归(stub React + stub cordis,渲染 lib/client.js)
 └── lib/                     # 构建产物 (gitignored)
     ├── index.js             #   Cordis 加载器 import 的 host 半
     ├── index.d.ts           #   host 半的类型导出
@@ -901,7 +916,7 @@ dsh --profile web --dump-config | grep -A3 'id: web-search-tavily'
 ### 测试
 
 ```bash
-pnpm test          # 构建 + 无宿主冒烟测试(纯逻辑,不联网)
+pnpm test          # 构建 + 无宿主冒烟测试 + 视图层渲染回归(纯逻辑,不联网)
 TAVILY_API_KEY=tvly-... node scripts/smoke-test.mjs --live   # 额外打一次真实请求(消耗 1 credit)
 ```
 
@@ -915,8 +930,12 @@ TAVILY_API_KEY=tvly-... node scripts/smoke-test.mjs --live   # 额外打一次�
   含「凭证域必须用位置参数调用 `remote.credentials`」「非法草稿整批拒绝(设置与凭证都不写)」
   「宿主接受但未落盘要判失败」「保存期间的新编辑不被吞掉」「并发保存只跑一次」「dispose 释放
   scope 与 remote 订阅」这些回归用例。
+- **卡片视图**（`scripts/client-render-test.mjs`）:用 stub React + stub cordis 服务在 Node 里渲染
+  `lib/client.js` —— 含「owner 的 `form` prop 不能顶掉注入的控制器(`card`)」「`view: 'summary'`
+  渲染成功」「`t()` 全链路出中文」「`navigator.clipboard` 缺失时复制进失败态且重进 guide 复位」
+  「根元素不是 `li`」「`label`/`aria-describedby` 程序化关联且双卡片 id 不撞」这些回归用例。
 
-纯逻辑都以具名导出留出了边界:加断言既不需要起 DSH,也不需要浏览器。
+纯逻辑都以具名导出留出了边界:加断言既不需要起 DSH,也不需要浏览器;视图层断言只需要构建产物。
 
 ### 构建注意事项 / Build caveats
 
@@ -952,7 +971,7 @@ TAVILY_API_KEY=tvly-... node scripts/smoke-test.mjs --live   # 额外打一次�
   ```
   客户端 bundle 不走 dts emit(`dts: false`),不受这个坑影响。
 
-- **典型产物大小**:host `lib/index.js` ~9.6 KB(host 半 + d.ts ~6.3 KB),client `lib/client.js` ~26 KB(gzip ~8 KB),全在 DSH `<plugins>` 静态服务允许范围内。
+- **典型产物大小**:host `lib/index.js` 21.0 KB(gzip 7.6 KB)+ `lib/index.d.ts` 18.3 KB,client `lib/client.js` 61.3 KB(gzip 19.4 KB),全在 DSH `<plugins>` 静态服务允许范围内。
 
 - **`@deepseek-ai/dsh-*` peer deps 标 `*`** —— 这意味着不锁版本,跟当前 DSH 一起发版就行。如果改用新 DSH 后 host 类型报错,先 `pnpm install` 让 pnpm 拉取 workspace 中最新的 DSH 包,再 `pnpm build`。
 
@@ -990,6 +1009,8 @@ pnpm add --save github:<your-org>/dsh-tavily-search-plugin
 | 0.1.0-rc.8 ~ rc.9 | ✅ 直接装 | 但需要显式设 `searchProvider: tavily` |
 | ≥ 0.1.0-rc.10 | ✅ 直接装 | 本插件开箱即用 |
 | ≥ 0.1.1 | ✅ 直接装 | `dsh.profile.bundles` 路径生效,`cordis.patch.yml` 由 loader 自动合入 —— 走 [§ 官方推荐安装](#官方推荐安装--official-install-dsh--0111) |
+| 0.1.x(至 0.1.5-rc.2) | ✅ | 设置走 `installSection` + `settingsScope` 卡片,`~/.dsh/settings.yaml` 承载用户层 |
+| **≥ 0.2.0-rc.2** | ✅ host + client | 设置模型重做:表单由 DSH 从 `Config` schema 自动派生(不再有 `installSection`),用户层迁到 profile patch 文档;卡片已移植到 `ctx.configForms` + Plugin Manager 的 `plugins.item` 插槽 |
 | Node ≥ 20 | ✅ | DSH 自身要求 |
 | Node 18 | ❌ | DSH 已不支持 |
 | Tavily API v1 | ✅ | 本插件用 `/search` endpoint,标准 v1 协议 |
@@ -1003,6 +1024,7 @@ pnpm add --save github:<your-org>/dsh-tavily-search-plugin
 | Ubuntu 22.04 | 20.x | 9.x | 0.1.0-rc.10 |
 | Windows 11 | 20.x | 9.x | 0.1.0-rc.10 |
 | Ubuntu 24.04 | 24.x | 11.x | **0.1.1-rc.2**(本次安装实测) |
+| Ubuntu 24.04 | 24.x | 11.x | **0.2.0-rc.2**(host 半适配实测:与其他插件一起零告警激活) |
 
 ---
 

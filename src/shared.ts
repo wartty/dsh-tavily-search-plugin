@@ -25,9 +25,11 @@ export const TAVILY_PROVIDER_ID = 'tavily'
 export const TAVILY_API_KEY_ENV = 'TAVILY_API_KEY'
 
 /**
- * Settings namespace this provider registers its section under and the card
- * edits. One definition for both halves: the card used to mirror the string in a
- * client-local constant, where a drift would silently unpair it from the host.
+ * The plugin's settings identity: the profile entry id, which is also the key its
+ * configuration form is filed under. DSH 0.2.0 derives a plugin's form from the
+ * entry's `Config` schema (`SettingsForms.describe()` reads active entries), so
+ * an entry IS its own settings namespace; before 0.2.0 this string named a
+ * separately installed section. The value never had to change.
  */
 export const TAVILY_SETTINGS_NAMESPACE = 'web-search-tavily'
 

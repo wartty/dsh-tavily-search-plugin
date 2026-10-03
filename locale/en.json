@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Tavily Web Search",
+    "description": "Routes the web_search tool through the Tavily API: endpoint, result budget, depth, topic and time window, plus an optional MCP hand-off mode."
+  }
+}

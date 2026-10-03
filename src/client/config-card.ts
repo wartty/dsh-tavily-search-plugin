@@ -1,21 +1,27 @@
 /**
- * The Tavily settings card — VIEW half of the client.
+ * The Tavily configuration card — VIEW half of the client.
  *
- * Registers one card into the `settings.plugin.item` slot keyed by
- * `web-search-tavily`, and renders it. Field specs, draft rules and the
- * staged-write controller live in `./card-model.ts`, which is React-free and
- * driven directly by `pnpm test`; this module only renders what it reports and
- * routes events back into it.
+ * DSH 0.2.0 moved plugin configuration to per-ENTRY forms: `ctx.configForms`
+ * hands out a form keyed by the profile entry id, and the Plugin Manager renders
+ * every `plugins.item` entry twice — a `view: 'summary'` line inside its plugin
+ * list and the full `view: 'page'` panel. This module claims that item and
+ * renders both views. Field specs, draft rules and the staged-write controller
+ * live in `./card-model.ts`, which is React-free and driven directly by
+ * `pnpm test`; this module only renders what it reports and routes events back.
  *
  * State matrix (the card renders in every state, it never silently vanishes):
  * - `status === 'loading'`: the host has not answered yet.
- * - `status === 'unavailable'`: the namespace is hidden from the web surface, or
- *   the connection holds preferences in memory (a non-loopback page).
+ * - `status === 'unavailable'`: the entry is not served, or the connection holds
+ *   configuration in memory (a non-loopback page).
  * - `status === 'ready'`: the editable form.
  *
- * USER-VISIBLE COPY is Chinese-only on purpose (single-language deployment); the
- * built-in cards localize through `ctx.locale`, which would mean shipping
- * dictionaries for a plugin whose audience is this profile.
+ * USER-VISIBLE COPY is never inlined here: every string resolves through the
+ * Client locale service (`ctx.locale.bind(namespace)`), whose dictionaries are
+ * registered by `src/client/index.ts` — the official rule is "route visible UI
+ * text through the Client locale service". The bound `t` is passed to the
+ * components as a PROP, never held in a module global: the card stays pure with
+ * respect to its inputs, and the reference is stable for the registration's
+ * lifetime (the runtime returns one function per namespace).
  * @module dsh-tavily-search-plugin/client/config-card
  */
 
@@ -24,71 +30,179 @@ import type { Context } from '@deepseek-ai/cordis'
 import { TAVILY_MCP_TOOLS, TAVILY_SETTINGS_NAMESPACE } from '../shared.ts'
 import { booleanText, CardForm, FIELDS } from './card-model.ts'
 import type { CardShell, FieldSpec } from './card-model.ts'
-import type { RemoteLike, SettingsScopeBinderLike } from './types.ts'
-
-/** Plugin display name shown on the card header. */
-const DISPLAY_NAME = 'Tavily'
-
-/** One-line subtitle: what this card configures. */
-const DISPLAY_DESCRIPTION = 'Tavily API 搜索提供方(默认走免费额度)。'
+import type { ConfigFormsLike, RemoteLike, TranslateLike } from './types.ts'
 
 /**
- * Register the Tavily card into `settings.plugin.item`.
+ * Register the Tavily config page with the Plugin Manager.
  *
- * All four services are declared in this bundle's `inject` (see
- * `src/client/index.ts`), so they are mounted by the time this runs. The
- * absent-services branch only guards a profile that mounts this bundle without
- * the settings surface; a card that cannot edit anything is worth less than a
- * diagnostic line.
+ * The services are declared in this bundle's `inject` (see `src/client/index.ts`),
+ * so they are mounted by the time this runs; the absent-services branch only
+ * guards a profile that mounts this bundle without the settings surface — a card
+ * that cannot edit anything is worth less than a diagnostic line.
  * @param ctx - the browser plugin context.
  */
 export function registerConfigCard(ctx: Context): void {
-  const settingsScope = ctx.get('settingsScope') as SettingsScopeBinderLike | undefined
+  // `configForms` is 0.2.0's replacement for the removed settings scope: one form
+  // per profile ENTRY id — the same key this plugin declares in `shared.ts`.
+  const forms = ctx.get('configForms') as ConfigFormsLike | undefined
   // The credential plane rides the remote surface (`remote.credentials`), NOT
   // `connection`: the connection handle carries transport state only.
   const remote = ctx.get('remote') as RemoteLike | undefined
 
-  if (settingsScope === undefined || remote === undefined) {
+  if (forms === undefined || remote === undefined) {
     ctx.logger.warn(
-      `[${TAVILY_SETTINGS_NAMESPACE}] settingsScope/remote missing; the card cannot mount`,
+      `[${TAVILY_SETTINGS_NAMESPACE}] configForms/remote missing; the config page cannot mount`,
     )
     return
   }
 
-  const form = new CardForm(settingsScope.bind({ namespace: TAVILY_SETTINGS_NAMESPACE }), remote)
+  const form = new CardForm(forms.get(TAVILY_SETTINGS_NAMESPACE), remote)
   // The form owns two subscriptions; tie their release to this plugin's fiber so
   // an HMR reload or unload cannot leave a stale instance publishing into
   // unmounted components.
-  ctx.effect(() => () => form.dispose(), 'tavily: settings-card form')
+  ctx.effect(() => () => form.dispose(), 'tavily: config form subscription')
 
-  // Keyed slot registration: the plugins tab dispatches one item per served
-  // settings namespace and renders whatever card claims that key. Keyed entries
-  // declare neither `order` nor `label` — the tab owns the ordering and the card
-  // owns its own copy (settings-card cookbook §3). `inject` hands the card its
-  // controller as props, which keeps the component identity stable across
-  // re-registrations (a fresh component function would remount and drop the
-  // card's open/guide state).
-  ctx.slots.inject('settings.plugin.item', () => ctx.slots.register(
-    { name: 'settings.plugin.item', key: TAVILY_SETTINGS_NAMESPACE, inject: () => ({ form }) },
-    ConfigCard,
+  // One bound translate for this registration; the runtime hands out a stable
+  // function per namespace, so passing it through the inject faces keeps the
+  // memoization of every consumer intact.
+  const t = bindTranslate(ctx)
+
+  // The controller rides in as `card`, NOT as `form`: the host renderer merges
+  // an entry's props as `...injected, ...slotInjected.props, ...ownerProps`, and
+  // `plugins.item` owner props are `PluginConfigViewProps` — whose `form` key is
+  // the HOST's `{state, mutate}` handle. Owner wins, so an injected `form` would
+  // be replaced by that handle, `form.subscribe(...)` would throw, and the slot
+  // error boundary would abdicate this entry for the rest of the page load.
+  // `view` is the one name we DO want the owner to win: the manager passes the
+  // real view for its list row and panel, while the settings tab hands over an
+  // empty prop bag and has to be told `'page'` by the inject face.
+
+  // Two settings surfaces can host a plugin's configuration, and a deployment
+  // mounts one of them:
+  //  - the BUILT-IN PLUGINS section renders one TAB per `settings.plugins.tab`
+  //    entry (this deployment ships no plugin-manager page, so this is where a
+  //    plugin's config page actually appears), and hands the tab an EMPTY prop
+  //    bag — the view has to be stated by the inject face;
+  //  - a Plugin Manager deployment renders a one-line `view: 'summary'` row and
+  //    the `view: 'page'` panel per `plugins.item` entry.
+  // Registering in both keeps the page reachable either way: each `slots.inject`
+  // waits for its own slot declaration, so the one that never appears costs
+  // nothing. Both claims sit behind `whileServed`, so disabling or uninstalling
+  // the entry leaves no dead tab/row behind.
+  ctx.effect(() => forms.whileServed([TAVILY_SETTINGS_NAMESPACE], () => {
+    const offTab = ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register(
+      {
+        name: 'settings.plugins.tab',
+        id: TAVILY_SETTINGS_NAMESPACE,
+        order: 40,
+        // A thunk, so the label follows a language switch without re-registering
+        // the entry (the slot owner resolves it at read time).
+        label: () => t('title'),
+        // Declaring the namespace also puts the framework's own `t` seat on the
+        // props; ours wins the merge and carries the interpolation fallback.
+        locale: TAVILY_SETTINGS_NAMESPACE,
+        inject: () => ({ card: form, view: 'page', t }),
+      },
+      ConfigCard,
+    ))
+    const offItem = ctx.slots.inject('plugins.item', () => ctx.slots.register(
+      {
+        name: 'plugins.item',
+        id: TAVILY_SETTINGS_NAMESPACE,
+        order: 40,
+        label: () => t('title'),
+        locale: TAVILY_SETTINGS_NAMESPACE,
+        inject: () => ({ card: form, t }),
+      },
+      ConfigCard,
+    ))
+    // The callback must return a function: `whileServed` keys its "already
+    // registered" guard on it, so returning void would re-register on every sync.
+    return () => { offTab?.(); offItem?.() }
+  }), 'tavily: config page')
+}
+
+// ---- Locale seam ----
+
+/**
+ * Substitute `{name}` placeholders in one template.
+ *
+ * The Client locale runtime already interpolates the params of `t(key, params)`,
+ * so on a real host this runs as a no-op; it exists because the second argument
+ * is the one part of the `t` seat no runtime check covers, and a raw `{tool}`
+ * reaching the card would be a visible defect. Substituting again is safe: our
+ * params are constants (namespace, credential ref, tool ids), never text that
+ * could itself contain braces.
+ * @param text - dictionary template, already interpolated or still raw.
+ * @param params - placeholder values; absent means nothing to substitute.
+ * @returns the text with every KNOWN placeholder replaced.
+ */
+function interpolate(text: string, params?: Record<string, unknown>): string {
+  if (params === undefined) return text
+  return text.replace(/\{(\w+)\}/g, (placeholder, name: string) => (
+    Object.hasOwn(params, name) ? String(params[name]) : placeholder
   ))
+}
+
+/**
+ * Bind this plugin's namespace to a translate function, keeping the `{name}`
+ * fallback at the same seam so every call site just calls `t(key, params)`.
+ * @param ctx - the browser plugin context (a `locale` provider is injected).
+ * @returns the namespace-bound translate function.
+ */
+function bindTranslate(ctx: Context): TranslateLike {
+  const bound = ctx.locale.bind(TAVILY_SETTINGS_NAMESPACE)
+  return (key, params) => interpolate(bound(key, params), params)
 }
 
 // ---- Card UI ----
 
 /** Props the slot injects into {@link ConfigCard}. */
 interface ConfigCardProps {
-  form?: CardForm
+  /** Namespace-bound translate, present in both registrations' inject faces. */
+  t: TranslateLike
+  /**
+   * The staged-form controller this card drives. It is spelled `card` rather
+   * than `form` because `plugins.item`'s owner props already own that name —
+   * see the registration comment above.
+   */
+  card?: CardForm
+  /** Which rendering the manager asked for: a one-line list row or the full panel. */
+  view?: 'summary' | 'page'
 }
 
 /**
- * Render the card body. Every hook is declared above every early return:
- * switching from "loading" to "ready" re-renders, and React would throw
- * "Rendered more hooks than during the previous render" if a hook sat below one.
- * @param props - the controller injected by the slot registration.
+ * The one-line row the manager shows inside its plugin list.
+ * @param form - the controller.
+ * @param shell - the card projection.
+ * @param t - namespace-bound translate.
+ * @returns the row element.
+ */
+function summaryRow(form: CardForm, shell: CardShell, t: TranslateLike): React.ReactElement {
+  const key = form.keyState()
+  const notes = [
+    t('description'),
+    key.configured ? t('summary.secretSet') : t('summary.secretUnset'),
+    ...shell.dirty ? [t('summary.dirty')] : [],
+    ...shell.failed ? [t('summary.failed')] : [],
+    // `writable` is `false` in the host's initial snapshot (status 'loading'), so
+    // testing it alone would make the first summary line claim "read-only" before
+    // the host has answered anything. Only a settled, non-writable document is
+    // actually read-only.
+    ...shell.status === 'ready' && !shell.writable ? [t('summary.readOnly')] : [],
+  ]
+  return React.createElement('span', { className: 'dstav-summary' }, notes.join(' · '))
+}
+
+/**
+ * Render the card. Every hook is declared above every early return: switching
+ * from "loading" to "ready" re-renders, and React would throw "Rendered more
+ * hooks than during the previous render" if a hook sat below one.
+ * @param props - the controller and translate injected by the slot registration,
+ *   plus the view.
  * @returns the card element.
  */
-function ConfigCard({ form }: ConfigCardProps): React.ReactElement {
+function ConfigCard({ t, card, view }: ConfigCardProps): React.ReactElement {
   const [open, setOpen] = React.useState(false)
   // MCP hand-off confirmation flow: 'asking' when the user flips useMcp on,
   // 'guide' after they answer "not configured yet" (shows the patch snippet).
@@ -98,36 +212,38 @@ function ConfigCard({ form }: ConfigCardProps): React.ReactElement {
   // card on "loading" until the next user input. `shell()` returns a cached
   // object, so React's identity check re-renders only on a real change.
   const subscribe = React.useCallback(
-    (notify: () => void) => form?.subscribe(notify) ?? (() => {}),
-    [form],
+    (notify: () => void) => card?.subscribe(notify) ?? (() => {}),
+    [card],
   )
-  const shell = React.useSyncExternalStore(subscribe, () => form?.shell() as CardShell)
+  const shell = React.useSyncExternalStore(subscribe, () => card?.shell() as CardShell)
 
+  // The controller is read through a local alias so the render helpers below can
+  // keep their `form` parameter name; only the PROP key had to change.
+  const form = card
   if (form === undefined) {
-    return statusCard(
-      '设置服务不可用',
-      '插件未拿到 settingsScope / remote 服务,卡片无法编辑。检查 profile 是否挂载了设置界面(web profile 默认挂载)。',
-    )
+    return statusCard(t('state.unmounted.title'), t('state.unmounted.body'))
   }
+  if (view === 'summary') return summaryRow(form, shell, t)
   if (!shell.available) {
     if (shell.status === 'unavailable') {
       return statusCard(
-        `设置命名空间 "${TAVILY_SETTINGS_NAMESPACE}" 当前不可写`,
-        '两种成因:该命名空间未对浏览器暴露(旧版 DSH 有白名单),或当前连接把偏好保留在内存里(非 loopback 页面不落盘)。host 半不受影响,`ctx.web` 每次搜索仍会读取该命名空间。',
-        '在 DSH 主机本机用 dsh web 打印的地址打开页面,可以拿到可持久化的设置面;命名空间暴露情况见插件 README 的故障排查章节。',
+        t('state.unavailable.title', { ns: TAVILY_SETTINGS_NAMESPACE }),
+        t('state.unavailable.body'),
+        t('state.unavailable.remedy'),
       )
     }
-    return statusCard(
-      '正在读取配置…',
-      '等待 host 端首次回答 settings.describe;到达后卡片会自动切换为可编辑状态。',
-    )
+    return statusCard(t('state.loading.title'), t('state.loading.body'))
   }
 
   const key = form.keyState()
   const onMcpToggled = (checked: boolean) => setMcpConfirm(checked ? 'asking' : 'idle')
 
+  // A `div`, not the `li` this card started as: BOTH hosts mount an item inside a
+  // non-list container (`div.panel`, `div[role=tabpanel]`, `section`), where a
+  // list item is invalid structure and is announced oddly by assistive tech. The
+  // class names are unchanged — every rule in `styles.ts` is a `.dstav-*` class.
   return React.createElement(
-    'li',
+    'div',
     { className: open ? 'dstav-card dstav-card-open' : 'dstav-card' },
     React.createElement(
       'button',
@@ -140,11 +256,11 @@ function ConfigCard({ form }: ConfigCardProps): React.ReactElement {
       React.createElement(
         'span',
         { className: 'dstav-head-text' },
-        React.createElement('span', { className: 'dstav-name' }, DISPLAY_NAME),
-        React.createElement('span', { className: 'dstav-description' }, DISPLAY_DESCRIPTION),
+        React.createElement('span', { className: 'dstav-name' }, t('title')),
+        React.createElement('span', { className: 'dstav-description' }, t('description')),
       ),
       shell.dirty || key.dirty
-        ? React.createElement('span', { className: 'dstav-badge' }, 'unsaved')
+        ? React.createElement('span', { className: 'dstav-badge' }, t('badge.unsaved'))
         : null,
       chevron(open),
     ),
@@ -157,39 +273,61 @@ function ConfigCard({ form }: ConfigCardProps): React.ReactElement {
           : React.createElement(
             'p',
             { className: 'dstav-read-only', role: 'status' },
-            '当前设置文档为只读(memory 模式或只读 provider),所有改动不会持久化。',
+            t('readOnly.note'),
           ),
-        keyField(form, key),
+        React.createElement(KeyField, { form, keyState: key, t }),
         // Field order is the model's; the toggle that opens the MCP guide is the
         // only field the view reacts to beyond staging its draft.
-        FIELDS.map(spec => renderField(
+        FIELDS.map(spec => React.createElement(FieldRow, {
+          key: spec.field,
           form,
           spec,
           shell,
-          spec.field === 'useMcp' ? onMcpToggled : undefined,
-        )),
-        React.createElement(McpPanel, { state: mcpConfirm, set: setMcpConfirm, form }),
-        footer(shell, form, key.dirty),
+          t,
+          onBooleanToggle: spec.field === 'useMcp' ? onMcpToggled : undefined,
+        })),
+        React.createElement(McpPanel, { state: mcpConfirm, set: setMcpConfirm, form, t }),
+        footer(shell, form, key.dirty, t),
       )
       : null,
   )
 }
 
+/** Props of {@link KeyField}. */
+interface KeyFieldProps {
+  form: CardForm
+  /**
+   * The credential plane's state. Spelled `keyState`, not `key`: React reserves
+   * the `key` prop name and would swallow the value as a reconciliation hint.
+   */
+  keyState: ReturnType<CardForm['keyState']>
+  /** Namespace-bound translate. */
+  t: TranslateLike
+}
+
 /**
  * The API-key control. It reads and writes the credentials domain, not the
  * settings document, so the literal never rides a settings response.
- * @param form - the form controller.
- * @param key - the credential plane's state.
+ *
+ * A component rather than a render helper so it can own its `useId`: an id has
+ * to be derived from a hook, and a hook called from a helper that the card only
+ * reaches past its early returns would change the card's hook count between
+ * renders.
+ * @param props - the form controller, the credential state and translate.
  * @returns the control row.
  */
-function keyField(form: CardForm, key: ReturnType<CardForm['keyState']>): React.ReactElement {
+function KeyField({ form, keyState: key, t }: KeyFieldProps): React.ReactElement {
+  // Instance-unique ids, so two cards in one document (a tab AND a manager row,
+  // or two plugin entries) cannot collide on `id`/`htmlFor`.
+  const inputId = React.useId()
+  const hintId = React.useId()
   const statusLabel = key.saving
-    ? '保存中…'
+    ? t('key.saving')
     : key.dirty
-      ? '未保存'
+      ? t('key.dirty')
       : key.configured
-        ? '已配置'
-        : '未配置'
+        ? t('key.configured')
+        : t('key.unconfigured')
   const statusClass = key.configured || key.dirty || key.saving ? 'dstav-badge' : 'dstav-badge-muted'
   return React.createElement(
     'div',
@@ -197,7 +335,7 @@ function keyField(form: CardForm, key: ReturnType<CardForm['keyState']>): React.
     React.createElement(
       'div',
       { className: 'dstav-field-head' },
-      React.createElement('label', { className: 'dstav-label', htmlFor: 'dstav-api-key' }, 'API key'),
+      React.createElement('label', { className: 'dstav-label', htmlFor: inputId }, t('key.label')),
       React.createElement(
         'span',
         { className: 'dstav-badges' },
@@ -205,19 +343,21 @@ function keyField(form: CardForm, key: ReturnType<CardForm['keyState']>): React.
       ),
     ),
     React.createElement('input', {
-      id: 'dstav-api-key',
+      id: inputId,
       className: 'dstav-input',
       type: 'password',
       autoComplete: 'off',
-      placeholder: key.configured ? '已配置——输入新值以替换' : '输入 Tavily API Key (tvly-...)',
+      placeholder: key.configured ? t('key.placeholder.replace') : t('key.placeholder.enter'),
       disabled: !key.writable || key.saving,
       value: key.staged,
+      // The hint is programmatically tied to the control, not just placed under it.
+      'aria-describedby': hintId,
       onChange: (event: React.ChangeEvent<HTMLInputElement>) => form.editKey(event.target.value),
     }),
     React.createElement(
       'p',
-      { className: 'dstav-hint' },
-      `写入后仅存于 DSH 凭证域(引用 ${key.ref}),不会随 settings 文档回传。`,
+      { id: hintId, className: 'dstav-hint' },
+      t('key.hint', { ref: key.ref }),
     ),
   )
 }
@@ -227,9 +367,15 @@ function keyField(form: CardForm, key: ReturnType<CardForm['keyState']>): React.
  * @param shell - the card-wide projection.
  * @param form - the form controller.
  * @param keyDirty - whether an API-key literal is staged.
+ * @param t - namespace-bound translate.
  * @returns the footer element.
  */
-function footer(shell: CardShell, form: CardForm, keyDirty: boolean): React.ReactElement {
+function footer(
+  shell: CardShell,
+  form: CardForm,
+  keyDirty: boolean,
+  t: TranslateLike,
+): React.ReactElement {
   // The key plane lives outside `staged`, so its draft counts as pending work:
   // Discard must be able to undo it, and Save must not be blocked by an invalid
   // settings draft while a key is waiting (the model refuses the whole save).
@@ -241,7 +387,7 @@ function footer(shell: CardShell, form: CardForm, keyDirty: boolean): React.Reac
       ? React.createElement(
         'p',
         { className: 'dstav-failed', role: 'status' },
-        '保存未全部生效;未落盘的草稿已保留,请修正或重试。',
+        t('footer.failed'),
       )
       : null,
     React.createElement(
@@ -252,7 +398,7 @@ function footer(shell: CardShell, form: CardForm, keyDirty: boolean): React.Reac
         disabled: !pending || shell.saving,
         onClick: () => form.discard(),
       },
-      '放弃',
+      t('footer.discard'),
     ),
     React.createElement(
       'button',
@@ -262,56 +408,75 @@ function footer(shell: CardShell, form: CardForm, keyDirty: boolean): React.Reac
         disabled: !pending || shell.invalid || shell.saving,
         onClick: () => { void form.save() },
       },
-      shell.saving ? '保存中…' : '保存',
+      shell.saving ? t('footer.saving') : t('footer.save'),
     ),
   )
 }
 
+/** Props of {@link FieldRow}. */
+interface FieldRowProps {
+  form: CardForm
+  /** The field's declaration. */
+  spec: FieldSpec
+  /** The card-wide projection. */
+  shell: CardShell
+  /** Namespace-bound translate (labels, hints and invalid copy are keys on the
+   * spec, so the model stays language-free). */
+  t: TranslateLike
+  /** Notified when a `boolean` field flips (used by MCP). */
+  onBooleanToggle?: (checked: boolean) => void
+}
+
 /**
  * Render one settings field.
- * @param form - the form controller.
- * @param spec - the field's declaration.
- * @param shell - the card-wide projection.
- * @param onBooleanToggle - notified when a `boolean` field flips (used by MCP).
+ *
+ * A component rather than a render helper so it can own its `useId` calls — see
+ * {@link KeyField} for why a hook in a helper would be a hook-order hazard.
+ * @param props - the form controller, the field's declaration, the card-wide
+ *   projection, translate, and the boolean-toggle callback.
  * @returns the field row.
  */
-function renderField(
-  form: CardForm,
-  spec: FieldSpec,
-  shell: CardShell,
-  onBooleanToggle?: (checked: boolean) => void,
-): React.ReactElement {
+function FieldRow({ form, spec, shell, t, onBooleanToggle }: FieldRowProps): React.ReactElement {
   const state = form.fieldState(spec.field)
   // Editing during a save would stage an edit the in-flight plan knows nothing
   // about; lock the controls for the duration instead.
   const disabled = !shell.writable || shell.saving
-  const inputId = `dstav-${spec.field}`
+  // Instance-unique ids: the label points at the control, and the control points
+  // back at the single message under it, so a screen reader reads the hint (or
+  // the refusal) as the control's description.
+  const inputId = React.useId()
+  const messageId = React.useId()
   const inputClass = state.invalid ? 'dstav-input dstav-input-invalid' : 'dstav-input'
+  // The `useMcp` hint names the tool the switch hands off to; tool ids are the
+  // shared host vocabulary, so they ride in as an interpolation param.
+  const hintParams = spec.field === 'useMcp' ? { tool: TAVILY_MCP_TOOLS.search } : undefined
   return React.createElement(
     'div',
-    { className: 'dstav-field', key: spec.field },
+    { className: 'dstav-field' },
     React.createElement(
       'div',
       { className: 'dstav-field-head' },
-      React.createElement('label', { className: 'dstav-label', htmlFor: inputId }, spec.label),
+      React.createElement('label', { className: 'dstav-label', htmlFor: inputId }, t(spec.labelKey)),
       state.overridden
         ? React.createElement(
           'span',
           { className: 'dstav-badges' },
-          React.createElement('span', { className: 'dstav-badge' }, 'overridden'),
+          React.createElement('span', { className: 'dstav-badge' }, t('badge.overridden')),
           React.createElement(
             'button',
             { type: 'button', className: 'dstav-reset', disabled, onClick: () => form.clear(spec.field) },
-            'reset',
+            t('badge.reset'),
           ),
         )
         : null,
     ),
-    fieldControl(form, spec, state, inputId, inputClass, disabled, onBooleanToggle),
+    fieldControl(form, spec, state, inputId, messageId, inputClass, disabled, t, onBooleanToggle),
     React.createElement(
       'p',
-      { className: state.invalid ? 'dstav-invalid' : 'dstav-hint' },
-      state.invalid ? spec.invalidLabel ?? 'Invalid value' : spec.hint,
+      { id: messageId, className: state.invalid ? 'dstav-invalid' : 'dstav-hint' },
+      state.invalid
+        ? t(spec.invalidKey ?? 'invalid.fallback')
+        : t(spec.hintKey, hintParams),
     ),
   )
 }
@@ -325,9 +490,11 @@ function renderField(
  * @param form - the form controller.
  * @param spec - the field's declaration.
  * @param state - the field's rendered state.
- * @param inputId - the control's DOM id (also the label's `htmlFor`).
+ * @param inputId - the control's instance-unique DOM id (also the label's `htmlFor`).
+ * @param messageId - id of the hint/invalid message describing this control.
  * @param inputClass - class for text-like controls.
  * @param disabled - whether writes are impossible right now.
+ * @param t - namespace-bound translate (the "(not set)" states).
  * @param onBooleanToggle - notified when a `boolean` field flips.
  * @returns the control element.
  */
@@ -336,8 +503,10 @@ function fieldControl(
   spec: FieldSpec,
   state: ReturnType<CardForm['fieldState']>,
   inputId: string,
+  messageId: string,
   inputClass: string,
   disabled: boolean,
+  t: TranslateLike,
   onBooleanToggle?: (checked: boolean) => void,
 ): React.ReactElement {
   if (spec.kind === 'select') {
@@ -346,20 +515,26 @@ function fieldControl(
       {
         id: inputId,
         className: inputClass,
+        'aria-describedby': messageId,
         ...state.invalid ? { 'aria-invalid': true } : {},
         value: state.text,
         disabled,
         onChange: (event: React.ChangeEvent<HTMLSelectElement>) => form.edit(spec.field, event.target.value),
       },
-      React.createElement('option', { value: '' }, '(未设置)'),
+      // The empty value is a real choice — "inherit the layer below" — so it needs
+      // a label of its own, not a blank option.
+      React.createElement('option', { value: '' }, t('field.unset')),
       (spec.options ?? []).map(option => React.createElement('option', { key: option, value: option }, option)),
     )
   }
   if (spec.kind === 'boolean') {
+    // A native checkbox already carries role/checked semantics; it only needs the
+    // description wired up, never a redundant `role`/`aria-checked`.
     return React.createElement('input', {
       id: inputId,
       className: 'dstav-checkbox',
       type: 'checkbox',
+      'aria-describedby': messageId,
       checked: form.booleanField(spec.field) === true,
       disabled,
       onChange: (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -373,9 +548,10 @@ function fieldControl(
     className: inputClass,
     type: 'text',
     ...spec.kind === 'number' ? { inputMode: 'numeric' as const } : {},
+    'aria-describedby': messageId,
     ...state.invalid ? { 'aria-invalid': true } : {},
     value: state.text,
-    placeholder: spec.placeholder ?? (spec.kind === 'number' ? '(未设置)' : ''),
+    placeholder: spec.placeholder ?? (spec.kind === 'number' ? t('field.unset') : ''),
     disabled,
     onChange: (event: React.ChangeEvent<HTMLInputElement>) => form.edit(spec.field, event.target.value),
   })
@@ -389,23 +565,31 @@ function fieldControl(
  * The URL carries a `<…>` placeholder on purpose: a `!!js process.env.X`
  * expression reads the shell environment DSH was launched from, which does NOT
  * include `~/.dsh/.credentials.yaml`, so a literal the user fills in is the
- * reliable form.
+ * reliable form. That placeholder is the snippet's ONE translated part — the rest
+ * is verbatim YAML the user pastes (and the copied text is exactly the text on
+ * screen, because both come from this one call).
+ * @param t - namespace-bound translate.
+ * @returns the snippet shown in the guide panel and copied to the clipboard.
  */
-const MCP_PATCH_SNIPPET = `- insert:
+function mcpPatchSnippet(t: TranslateLike): string {
+  return `- insert:
     - id: mcp-tavily
       name: '@deepseek-ai/dsh-mcp-client'
       config:
         transport: streamable-http
         serverName: tavily
-        url: https://mcp.tavily.com/mcp/?tavilyApiKey=<把你的 key 粘到这里 — 见 ~/.dsh/.credentials.yaml>
+        url: https://mcp.tavily.com/mcp/?tavilyApiKey=<${t('mcp.guide.snippetPlaceholder')}>
         toolCallTimeoutMs: 60000
         failOnStartupError: false`
+}
 
 /** Props of {@link McpPanel}. */
 interface McpPanelProps {
   state: 'idle' | 'asking' | 'guide'
   set: (next: 'idle' | 'asking' | 'guide') => void
   form: CardForm
+  /** Namespace-bound translate, forwarded from the card. */
+  t: TranslateLike
 }
 
 /**
@@ -416,10 +600,10 @@ interface McpPanelProps {
  * confirm the server is already configured. It is a component, not a helper
  * called from a branch, so it may legitimately own state (the copy feedback) and
  * cannot become a conditional-hook bug later.
- * @param props - panel state, its setter, and the form controller.
+ * @param props - panel state, its setter, the form controller and translate.
  * @returns the panel, or `null` when it does not apply.
  */
-function McpPanel({ state, set, form }: McpPanelProps): React.ReactElement | null {
+function McpPanel({ state, set, form, t }: McpPanelProps): React.ReactElement | null {
   const [copy, setCopy] = React.useState<'idle' | 'copied' | 'failed'>('idle')
   if (state === 'idle') return null
   // The panel only makes sense while a `useMcp: true` draft is staged; a discard
@@ -430,26 +614,40 @@ function McpPanel({ state, set, form }: McpPanelProps): React.ReactElement | nul
     return React.createElement(
       'div',
       { className: 'dstav-mcp-panel', role: 'status' },
-      React.createElement('p', { className: 'dstav-mcp-title' }, '是否已经配置了 Tavily 的 MCP 服务器？'),
+      React.createElement('p', { className: 'dstav-mcp-title' }, t('mcp.asking.title')),
       React.createElement(
         'div',
         { className: 'dstav-mcp-actions' },
-        React.createElement('button', { type: 'button', className: 'dstav-mcp-yes', onClick: () => set('idle') }, '是，已配置'),
-        React.createElement('button', { type: 'button', className: 'dstav-mcp-no', onClick: () => set('guide') }, '否，未配置'),
+        React.createElement('button', { type: 'button', className: 'dstav-mcp-yes', onClick: () => set('idle') }, t('mcp.asking.yes')),
+        React.createElement(
+          'button',
+          {
+            type: 'button',
+            className: 'dstav-mcp-no',
+            // Entering the guide starts a fresh visit, so the copy feedback must
+            // not carry over: the panel is not unmounted between phases, and a
+            // stale "Copied" would claim a clipboard write from a previous visit.
+            onClick: () => { setCopy('idle'); set('guide') },
+          },
+          t('mcp.asking.no'),
+        ),
       ),
     )
   }
 
-  const copyLabel = copy === 'copied' ? '已复制' : copy === 'failed' ? '复制失败,请手动选择' : '复制配置'
+  const snippet = mcpPatchSnippet(t)
+  const copyLabel = copy === 'copied'
+    ? t('mcp.guide.copied')
+    : copy === 'failed' ? t('mcp.guide.copyFailed') : t('mcp.guide.copy')
   return React.createElement(
     'div',
     { className: 'dstav-mcp-panel' },
     React.createElement(
       'p',
       { className: 'dstav-mcp-title' },
-      '尚未配置 Tavily MCP 服务器。将以下配置粘贴到 ~/.dsh/profiles/web/cordis.patch.yml,然后重启 DSH:',
+      t('mcp.guide.title'),
     ),
-    React.createElement('pre', { className: 'dstav-mcp-snippet' }, MCP_PATCH_SNIPPET),
+    React.createElement('pre', { className: 'dstav-mcp-snippet' }, snippet),
     React.createElement(
       'div',
       { className: 'dstav-mcp-actions' },
@@ -459,21 +657,28 @@ function McpPanel({ state, set, form }: McpPanelProps): React.ReactElement | nul
           type: 'button',
           className: 'dstav-mcp-copy',
           onClick: () => {
-            // A clipboard write can reject (permission, non-secure origin), so
-            // report the outcome instead of silently doing nothing.
-            void navigator.clipboard?.writeText(MCP_PATCH_SNIPPET)
-              .then(() => setCopy('copied'), () => setCopy('failed'))
+            // `navigator.clipboard` is absent outside a secure context (plain
+            // `http://<lan-ip>:3080`), where `navigator.clipboard?.writeText(...)`
+            // would short-circuit the WHOLE chain: no rejection to catch and no
+            // `.then` to run, so the button would report nothing at all. A write
+            // can also reject (permission, non-secure origin). Both paths must
+            // land on the visible failure state. `snippet` is the very text
+            // rendered above — never a second copy of it.
+            const clipboard = navigator.clipboard
+            if (clipboard === undefined) { setCopy('failed'); return }
+            clipboard.writeText(snippet).then(() => setCopy('copied'), () => setCopy('failed'))
           },
         },
         copyLabel,
       ),
-      React.createElement('button', { type: 'button', className: 'dstav-mcp-back', onClick: () => set('asking') }, '返回'),
+      React.createElement('button', { type: 'button', className: 'dstav-mcp-back', onClick: () => set('asking') }, t('mcp.guide.back')),
     ),
     React.createElement(
       'p',
       { className: 'dstav-mcp-note' },
-      `粘贴并重启后,模型会看到 ${Object.values(TAVILY_MCP_TOOLS).join(' / ')} 工具;`
-      + '本开关保存后,web_search 将让位给 MCP 搜索且不消耗 REST 配额。',
+      // The tool list is host vocabulary (`../shared.ts`), so it interpolates
+      // instead of living duplicated inside the dictionary.
+      t('mcp.guide.note', { tools: Object.values(TAVILY_MCP_TOOLS).join(' / ') }),
     ),
   )
 }
@@ -500,6 +705,8 @@ function chevron(open: boolean): React.ReactElement {
 
 /**
  * A read-only status card explaining why the editable form cannot be shown.
+ * Every string arrives already resolved through `t`, so this helper stays a
+ * pure layout function.
  * @param title - the headline.
  * @param body - what happened.
  * @param remedy - optional next step.
@@ -507,7 +714,9 @@ function chevron(open: boolean): React.ReactElement {
  */
 function statusCard(title: string, body: string, remedy?: string): React.ReactElement {
   return React.createElement(
-    'li',
+    // Same reasoning as the editable card: the hosts mount an item in a
+    // non-list container, so the root is a neutral `div`.
+    'div',
     { className: 'dstav-card' },
     React.createElement(
       'div',

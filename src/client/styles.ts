@@ -68,6 +68,11 @@ const CARD_CSS = `
   margin: 0; padding-top: 12px;
   font-size: 12px; line-height: 1.5;
 }
+/* The one-line row the Plugin Manager shows inside its plugin list. */
+.dstav-summary {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px; line-height: 1.5;
+}
 .dstav-footer {
   display: flex; align-items: center; justify-content: flex-end; gap: 8px;
   padding-top: 12px;

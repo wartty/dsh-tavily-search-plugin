@@ -25,9 +25,15 @@
  * @module dsh-tavily-search-plugin/client/card-model
  */
 
-import { TAVILY_API_KEY_ENV, TAVILY_MCP_TOOLS } from '../shared.ts'
+import { TAVILY_API_KEY_ENV } from '../shared.ts'
 import { TAVILY_SEARCH_DEPTHS, TAVILY_TIME_RANGES, TAVILY_TOPICS } from '../shared.ts'
-import type { RemoteLike, SettingsScopeLike, SettingsSnapshot } from './types.ts'
+import type { ConfigFormLike, ConfigSnapshot, RemoteLike } from './types.ts'
+import type { CopyKey } from './locales.ts'
+
+// Re-exported so `pnpm test` can assert every field key exists in BOTH language
+// tables without reaching into the browser-only bundle.
+export { en, zh } from './locales.ts'
+export type { CopyKey } from './locales.ts'
 
 // ---- Field declaration ----
 
@@ -36,123 +42,129 @@ export interface FieldSpec {
   /** Settings-section field name (the key written to the user layer). */
   field: string
   kind: 'text' | 'number' | 'select' | 'textlist' | 'boolean'
-  /** Visible label. */
-  label: string
-  /** Hint shown under the control. */
-  hint: string
-  /** Shown in place of the hint while the draft is invalid. */
-  invalidLabel?: string
+  /** Copy key for the visible label — `t(labelKey)`, never the copy itself. */
+  labelKey: CopyKey
+  /** Copy key for the hint under the control. */
+  hintKey: CopyKey
+  /** Copy key shown instead of the hint while the draft is invalid. */
+  invalidKey?: CopyKey
   /** Number-field floor (mirrors the schema, so a bad draft is caught before Save). */
   min?: number
   /** Number-field ceiling (mirrors the schema). */
   max?: number
+  /**
+   * Extra draft format the host schema enforces on top of `kind`. `'date'` is the
+   * host's `z.string().pattern(YYYY_MM_DD)`: without it an `'text'` field would
+   * accept anything non-empty, and Save would only fail at the host's schema with
+   * the generic footer message.
+   */
+  format?: 'date'
   /** Options for `select` fields — the verbatim wire values, shared with the host. */
   options?: readonly string[]
-  /** Placeholder for text / textlist inputs. */
+  /** Placeholder for text / textlist inputs (an example value, not copy). */
   placeholder?: string
 }
 
 /**
  * The card's fields, in render order. Options come from `../shared.ts` so a
  * vocabulary change cannot desynchronize this dropdown from the request body the
- * host builds, and `min`/`max` mirror the host schema so a draft the host would
- * refuse is refused before the round trip.
+ * host builds, and `min`/`max`/`format` mirror the host schema so a draft the host
+ * would refuse is refused before the round trip.
  */
 export const FIELDS: readonly FieldSpec[] = [
-  {
-    field: 'baseURL',
-    kind: 'text',
-    label: '接口地址',
-    hint: '默认 https://api.tavily.com,/search 由插件自动追加。',
-  },
+  { field: 'baseURL', kind: 'text', labelKey: 'field.baseURL.label', hintKey: 'field.baseURL.hint' },
   {
     field: 'maxResults',
     kind: 'number',
-    label: '每次搜索最多结果数',
-    hint: 'Tavily 每次搜索返回的结果数上限(1–20),默认 7。',
-    invalidLabel: '必须是 1–20 的整数',
+    labelKey: 'field.maxResults.label',
+    hintKey: 'field.maxResults.hint',
+    invalidKey: 'field.maxResults.invalid',
     min: 1,
     max: 20,
   },
   {
     field: 'searchDepth',
     kind: 'select',
-    label: '搜索深度',
-    hint: 'basic/fast/ultra-fast 计 1 credit,advanced 计 2 credits。',
+    labelKey: 'field.searchDepth.label',
+    hintKey: 'field.searchDepth.hint',
     options: TAVILY_SEARCH_DEPTHS,
   },
   {
     field: 'topic',
     kind: 'select',
-    label: '主题类别',
-    hint: 'news 偏向实时新闻;general 为通用搜索;finance 为财经数据。',
+    labelKey: 'field.topic.label',
+    hintKey: 'field.topic.hint',
     options: TAVILY_TOPICS,
   },
   {
     field: 'timeRange',
     kind: 'select',
-    label: '时间范围',
-    hint: 'Tavily 较新的时间窗形式(优先于「回溯天数」)。',
+    labelKey: 'field.timeRange.label',
+    hintKey: 'field.timeRange.hint',
     options: TAVILY_TIME_RANGES,
   },
   {
     field: 'days',
     kind: 'number',
-    label: '回溯天数',
-    hint: '仅 topic=news 时生效;0 表示不限时间窗(旧版字段,建议改用「时间范围」)。',
-    invalidLabel: '必须是 ≥ 0 的整数',
+    labelKey: 'field.days.label',
+    hintKey: 'field.days.hint',
+    invalidKey: 'field.days.invalid',
     min: 0,
   },
   {
     field: 'startDate',
     kind: 'text',
-    label: '起始日期',
-    hint: '仅返回该日期之后发布/更新的结果,格式 YYYY-MM-DD。',
+    labelKey: 'field.startDate.label',
+    hintKey: 'field.startDate.hint',
+    invalidKey: 'field.startDate.invalid',
+    format: 'date',
     placeholder: '2026-01-01',
   },
   {
     field: 'endDate',
     kind: 'text',
-    label: '截止日期',
-    hint: '仅返回该日期之前发布/更新的结果,格式 YYYY-MM-DD。',
+    labelKey: 'field.endDate.label',
+    hintKey: 'field.endDate.hint',
+    invalidKey: 'field.endDate.invalid',
+    format: 'date',
     placeholder: '2026-12-31',
   },
   {
     field: 'chunksPerSource',
     kind: 'number',
-    label: '每源内容块数',
-    hint: '每个来源返回的内容片段数(1–3),控制 content 长度。',
-    invalidLabel: '必须是 1–3 的整数',
+    labelKey: 'field.chunksPerSource.label',
+    hintKey: 'field.chunksPerSource.hint',
+    invalidKey: 'field.chunksPerSource.invalid',
     min: 1,
     max: 3,
   },
   {
     field: 'snippetMaxChars',
     kind: 'number',
-    label: '单条摘录上限',
-    hint: '每个来源正文的字符上限(含末尾省略号),默认 600;这是控制上下文占用的闸门。',
-    invalidLabel: '必须是 ≥ 16 的整数',
+    labelKey: 'field.snippetMaxChars.label',
+    hintKey: 'field.snippetMaxChars.hint',
+    invalidKey: 'field.snippetMaxChars.invalid',
     min: 16,
   },
   {
     field: 'includeDomains',
     kind: 'textlist',
-    label: '包含域名',
-    hint: '逗号分隔,结果仅限定这些域名(最多 300 个)。',
+    labelKey: 'field.includeDomains.label',
+    hintKey: 'field.includeDomains.hint',
     placeholder: 'example.com, news.site.org',
   },
   {
     field: 'excludeDomains',
     kind: 'textlist',
-    label: '排除域名',
-    hint: '逗号分隔,从结果中排除这些域名(最多 150 个)。',
+    labelKey: 'field.excludeDomains.label',
+    hintKey: 'field.excludeDomains.hint',
     placeholder: 'spam.example, junk.org',
   },
   {
     field: 'useMcp',
     kind: 'boolean',
-    label: '使用 Tavily MCP 服务器',
-    hint: `开启后 web_search 让位给 ${TAVILY_MCP_TOOLS.search} 等 MCP 工具(需先配置 MCP 服务器,开关下方会给配置片段)。`,
+    labelKey: 'field.useMcp.label',
+    hintKey: 'field.useMcp.hint',
   },
 ]
 
@@ -250,7 +262,7 @@ export class CardForm {
   private plannedWrites: FieldWrite[]
 
   constructor(
-    private readonly scope: SettingsScopeLike,
+    private readonly scope: ConfigFormLike,
     private readonly remote: RemoteLike,
   ) {
     this.plannedWrites = this.buildPlan()
@@ -306,7 +318,7 @@ export class CardForm {
       overridden: staged === undefined ? Object.hasOwn(user ?? {}, field) : staged.kind === 'edit',
       // Only a draft can be invalid: a composition value outside this card's
       // rules is the host's business and must not paint the card red.
-      invalid: staged === undefined ? false : !isValidDraft(fieldSpec(field), staged.text),
+      invalid: staged?.kind === 'edit' ? !isValidDraft(fieldSpec(field), staged.text) : false,
     }
   }
 
@@ -498,7 +510,9 @@ export class CardForm {
   private buildShell(): CardShell {
     const snapshot = this.scope.getSnapshot()
     return {
-      status: snapshot.status,
+      status: snapshot.status === 'ready'
+        ? 'ready'
+        : snapshot.status === 'unavailable' ? 'unavailable' : 'loading',
       available: snapshot.status === 'ready',
       writable: snapshot.writable,
       dirty: this.plannedWrites.length > 0,
@@ -537,6 +551,33 @@ function sameValue(left: unknown, right: unknown): boolean {
 
 // ---- Draft rules (pure) ----
 
+/** The host schema's `YYYY_MM_DD` shape (see `YYYY_MM_DD` in `../index.ts`). */
+const YYYY_MM_DD = /^(\d{4})-(\d{2})-(\d{2})$/
+
+/**
+ * Whether a draft is a real calendar day in `YYYY-MM-DD` form.
+ *
+ * The pattern alone is not enough: `2026-02-31` and `2026-13-01` match it and the
+ * host's `z.string().pattern(...)` would accept them, but Tavily's API and the
+ * host's own date comparison both expect a date that exists. The round trip
+ * through `Date.UTC` is the "exists" check — a normalised overflow (Feb 31 →
+ * Mar 3) shows up as a different month/day.
+ * @param text - the draft.
+ * @returns whether it is a well-formed existing date.
+ */
+function isCalendarDate(text: string): boolean {
+  const match = YYYY_MM_DD.exec(text)
+  if (match === null) return false
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  if (month < 1 || month > 12 || day < 1 || day > 31) return false
+  const parsed = new Date(Date.UTC(year, month - 1, day))
+  return parsed.getUTCFullYear() === year
+    && parsed.getUTCMonth() === month - 1
+    && parsed.getUTCDate() === day
+}
+
 /**
  * Whether a draft may be written.
  *
@@ -548,6 +589,9 @@ function sameValue(left: unknown, right: unknown): boolean {
  */
 export function isValidDraft(spec: FieldSpec, text: string): boolean {
   if (text === '') return true
+  // A declared format is checked before `kind`: it mirrors a host-schema
+  // constraint, and a draft the host would refuse must never reach Save.
+  if (spec.format === 'date' && !isCalendarDate(text)) return false
   switch (spec.kind) {
     case 'text':
     case 'textlist':
@@ -615,7 +659,7 @@ export function stringOf(value: unknown): string {
  * @param snapshot - the current settings snapshot.
  * @returns the declared reference, else the built-in default.
  */
-export function credentialRefIn(snapshot: SettingsSnapshot): string {
+export function credentialRefIn(snapshot: ConfigSnapshot): string {
   const declared = recordOf(snapshot.value)?.['apiKeyEnv']
   return typeof declared === 'string' && declared.length > 0 ? declared : TAVILY_API_KEY_ENV
 }

@@ -12,7 +12,8 @@
  *   6. MCP 让位模式的行为（available 恒真、search 不联网只返回引导文案）。
  *
  * 卡片模型（lib/card-model.js，无 React）：
- *   7. 字段表与宿主 schema/词汇表是单一事实源（选项数组是同一引用）；
+ *   7. 字段表与宿主 schema/词汇表是单一事实源（选项数组是同一引用），字段只存
+ *      文案 key，且每个 key 在 en/zh 两张字典里都非空（字典 key 集合逐一对应）；
  *   8. 草稿校验与强转规则；
  *   9. `CardForm` 的写入器 —— 用 stub 服务驱动，回归"凭证域挂错服务"那类事故。
  *
@@ -33,6 +34,7 @@ import {
   toProviderError,
   toProviderOptions,
   toSearchResult,
+  readConfig,
   validateSection,
 } from '../lib/index.js'
 import {
@@ -41,10 +43,12 @@ import {
   coerceDraft,
   credentialRefIn,
   credentialRefOf,
+  en,
   FIELDS,
   fieldSpec,
   isValidDraft,
   stringOf,
+  zh,
 } from '../lib/card-model.js'
 
 let failed = 0
@@ -54,7 +58,13 @@ const throws = (fn, label) => {
 }
 
 // ---- 1) schema：默认值与约束 ----
-const defaults = Config({})
+// 0.2.0 的配置字段是 Volatile 引用（DSH 只把 volatile 字段投影成表单），默认值要经 readConfig 解包。
+const resolved = Config({})
+const defaults = readConfig(resolved)
+check(
+  Object.values(resolved).every(field => typeof field.get === 'function'),
+  '全部配置字段都是 Volatile 引用(表单只投影 volatile 字段)',
+)
 check(defaults.baseURL === 'https://api.tavily.com', 'schema 提供 baseURL 默认值')
 check(defaults.searchDepth === 'advanced', 'schema 提供 searchDepth 默认值')
 check(defaults.maxResults === 7, 'schema 提供 maxResults 默认值')
@@ -75,7 +85,7 @@ throws(() => Config({ startDate: '2026/01/01' }), '非 YYYY-MM-DD 日期被拒�
 throws(() => Config({ chunksPerSource: 4 }), 'chunksPerSource 超范围被拒绝')
 
 // ---- 2) 投影 ----
-const project = (patch) => toProviderOptions(Config(patch))
+const project = (patch) => toProviderOptions(readConfig(Config(patch)))
 const base = project({})
 check(base.maxResults === 7 && base.searchDepth === 'advanced', '投影保留默认值')
 check(base.apiKey === undefined, '未配置字面 key 时投影不含 apiKey')
@@ -171,14 +181,34 @@ if (process.argv.includes('--live') && process.env.TAVILY_API_KEY) {
 // ---- 7) 卡片字段表与宿主是单一事实源 ----
 const hostDefaults = Config({})
 const NO_SCHEMA_DEFAULT = new Set(['apiKey', 'timeRange', 'startDate', 'endDate'])
+// 文案不再内联在字段表里:每个可见字符串都经 Client locale 服务取词,所以这里
+// 钉住"字段指向的 key 在两种语言里都有非空文案",以及字段表本身不回流文案。
+const hasCopy = (table, key) => typeof table[key] === 'string' && table[key].length > 0
 for (const spec of FIELDS) {
-  check(spec.label.length > 0 && spec.hint.length > 0, `字段 ${spec.field} 有标签与提示`)
+  check(
+    hasCopy(en, spec.labelKey) && hasCopy(zh, spec.labelKey),
+    `字段 ${spec.field} 的标签在 en/zh 都有文案`,
+  )
+  check(
+    hasCopy(en, spec.hintKey) && hasCopy(zh, spec.hintKey),
+    `字段 ${spec.field} 的提示在 en/zh 都有文案`,
+  )
+  if (spec.invalidKey !== undefined) {
+    check(
+      hasCopy(en, spec.invalidKey) && hasCopy(zh, spec.invalidKey),
+      `字段 ${spec.field} 的非法文案在 en/zh 都有文案`,
+    )
+  }
   check(
     hostDefaults[spec.field] !== undefined || NO_SCHEMA_DEFAULT.has(spec.field),
     `字段 ${spec.field} 在宿主 schema 里有对应项`,
   )
   if (spec.kind === 'select') check((spec.options?.length ?? 0) > 0, `select 字段 ${spec.field} 有选项`)
 }
+check(
+  FIELDS.every(spec => spec.label === undefined && spec.hint === undefined && spec.invalidLabel === undefined),
+  '字段表只存 key,不内联文案',
+)
 throws(() => fieldSpec('nope'), '未知字段名立即报错(不漏渲染空控件)')
 // Each half inlines `src/shared.ts`, so the halves are separate bundle copies:
 // equality here is by VALUE (which is what catches a drifted copy), not identity.
@@ -189,12 +219,49 @@ check(sameValues(fieldSpec('timeRange').options, TAVILY_TIME_RANGES), '时间范
 check(fieldSpec('maxResults').min === 1 && fieldSpec('maxResults').max === 20, 'maxResults 上下限与 schema 一致')
 check(fieldSpec('chunksPerSource').max === 3, 'chunksPerSource 上限与 schema 一致')
 check(fieldSpec('snippetMaxChars').min === 16, 'snippetMaxChars 下限与 schema 一致')
+// 宿主 schema 是 z.string().pattern(YYYY_MM_DD)：两个日期字段必须声明 format，
+// 否则 text 控件对任何非空草稿都放行，`2026-1-1` 会一路走到 Save 才被宿主拒绝。
+check(fieldSpec('startDate').format === 'date' && fieldSpec('endDate').format === 'date', 'startDate/endDate 声明 format=date')
+check(
+  fieldSpec('startDate').invalidKey === 'field.startDate.invalid'
+  && fieldSpec('endDate').invalidKey === 'field.endDate.invalid',
+  'startDate/endDate 带各自的非法文案 key',
+)
+
+// ---- 7b) 字典本身:两种语言的 key 集合必须逐字一致(无缺翻译) ----
+const enKeys = Object.keys(en).sort()
+const zhKeys = Object.keys(zh).sort()
+check(sameValues(enKeys, zhKeys), `en/zh 字典 key 集合完全一致(各 ${enKeys.length} 个 key,无缺翻译)`)
+check(
+  enKeys.every(key => en[key].length > 0 && zh[key].length > 0),
+  '每个字典 key 在 en/zh 里都是非空文案',
+)
 
 // ---- 8) 草稿规则 ----
 const numberSpec = fieldSpec('maxResults')
 check(isValidDraft(numberSpec, '3') && !isValidDraft(numberSpec, '99') && !isValidDraft(numberSpec, 'x'), '数字草稿按上下限校验')
 check(isValidDraft(numberSpec, ''), '空草稿 = 继承 base,始终合法')
 check(isValidDraft(fieldSpec('searchDepth'), 'advanced') && !isValidDraft(fieldSpec('searchDepth'), 'nope'), '枚举草稿按选项校验')
+// 日期草稿：形状对 + 真实存在。`2026-1-1` 被宿主的 pattern 拒绝，`2026-02-31`
+// 匹配 pattern 却是非法日历日，两者都必须在 Save 之前拦下。
+const startSpec = fieldSpec('startDate')
+const endSpec = fieldSpec('endDate')
+check(
+  isValidDraft(startSpec, '2026-01-01') && isValidDraft(startSpec, '2028-02-29'),
+  '日期草稿接受 YYYY-MM-DD 与闰日',
+)
+check(
+  !isValidDraft(startSpec, '2026-1-1')
+  && !isValidDraft(startSpec, '2026/01/01')
+  && !isValidDraft(startSpec, '2026-02-31')
+  && !isValidDraft(startSpec, '2026-13-01')
+  && !isValidDraft(startSpec, '2026-00-10')
+  && !isValidDraft(startSpec, 'not-a-date'),
+  '日期草稿拒绝非 YYYY-MM-DD 形状与非法日历日',
+)
+check(!isValidDraft(endSpec, '2027-02-29') && isValidDraft(endSpec, '2027-02-28'), '日期草稿按平年/闰年判定二月天数')
+check(isValidDraft(startSpec, ''), '空日期草稿仍然合法(继承 base)')
+check(coerceDraft(startSpec, '2026-01-01') === '2026-01-01', '日期草稿按字符串原样写入(不下发 Date/时间戳)')
 check(coerceDraft(numberSpec, '5') === 5, '数字草稿转成 number')
 check(JSON.stringify(coerceDraft(fieldSpec('includeDomains'), 'a.com, b.com ,')) === '["a.com","b.com"]', 'textlist 草稿去空白去空项')
 check(coerceDraft(fieldSpec('useMcp'), 'true') === true, 'boolean 草稿转成 true')
@@ -309,6 +376,18 @@ check(
 check(form.shell().failed === true && form.keyState().staged === 'tvly-late', '被拒的保存标记 failed 并保留密钥草稿')
 form.discard()
 check(form.plan().length === 0 && form.keyState().staged === '', 'discard 同时清掉设置与密钥草稿')
+
+// 非法日期草稿同样整批拒绝：绝不让 `2026-1-1` 走到宿主 schema 才失败
+form.edit('startDate', '2026-1-1')
+check(form.shell().invalid === true && form.plan()[0]?.kind === 'refused', '非法日期草稿标记 refused')
+const beforeBadDate = main.state.writes.length
+await form.save()
+check(main.state.writes.length === beforeBadDate, '非法日期草稿不产生任何写入')
+form.discard()
+form.edit('startDate', '2026-01-01')
+check(form.shell().invalid === false, '合法日期草稿不标红')
+await form.save()
+check(JSON.stringify(main.state.writes.at(-1)) === '["startDate","2026-01-01"]', '合法日期草稿按字符串写入 scope.set')
 
 form.edit('useMcp', 'true')
 check(form.booleanField('useMcp') === true, 'booleanField 读取草稿')
