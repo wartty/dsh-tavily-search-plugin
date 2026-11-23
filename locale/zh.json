@@ -1,6 +1,7 @@
 {
   "meta": {
     "title": "Tavily 网页搜索",
-    "description": "让 web_search 工具走 Tavily API:可配置端点、结果条数、搜索深度、主题与时间窗,并可选让位给 Tavily MCP 工具。"
+    "description": "让 web_search 工具走 Tavily API:可配置端点、结果条数、搜索深度、主题与时间窗,并可选让位给 Tavily MCP 工具。",
+    "detail": "docs/DETAIL.zh.md"
   }
 }

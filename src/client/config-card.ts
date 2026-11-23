@@ -74,25 +74,21 @@ export function registerConfigCard(ctx: Context): void {
   // be replaced by that handle, `form.subscribe(...)` would throw, and the slot
   // error boundary would abdicate this entry for the rest of the page load.
   // `view` is the one name we DO want the owner to win: the manager passes the
-  // real view for its list row and panel, while the settings tab hands over an
-  // empty prop bag and has to be told `'page'` by the inject face.
+  // real view for its list row and panel.
 
-  // Two settings surfaces can host a plugin's configuration, and a deployment
-  // mounts one of them:
-  //  - the BUILT-IN PLUGINS section renders one TAB per `settings.plugins.tab`
-  //    entry (this deployment ships no plugin-manager page, so this is where a
-  //    plugin's config page actually appears), and hands the tab an EMPTY prop
-  //    bag — the view has to be stated by the inject face;
-  //  - a Plugin Manager deployment renders a one-line `view: 'summary'` row and
-  //    the `view: 'page'` panel per `plugins.item` entry.
-  // Registering in both keeps the page reachable either way: each `slots.inject`
-  // waits for its own slot declaration, so the one that never appears costs
-  // nothing. Both claims sit behind `whileServed`, so disabling or uninstalling
-  // the entry leaves no dead tab/row behind.
-  ctx.effect(() => forms.whileServed([TAVILY_SETTINGS_NAMESPACE], () => {
-    const offTab = ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register(
+  // DSH 0.2.2 owns plugin configuration end to end: the Plugin Manager (available
+  // in standard mode) renders the detail page and hands the entry a `page` view —
+  // and the built-in web-search companion package was DELETED rather than kept,
+  // with the read-only inventory taking over the old Settings section. Registering
+  // into `settings.plugins.tab` there would resurface a config page the spec now
+  // assigns to the manager, so this bundle claims ONLY the manager's item. The
+  // claim still sits behind `whileServed`, so disabling or uninstalling the entry
+  // leaves no dead row behind.
+  ctx.effect(() => forms.whileServed([TAVILY_SETTINGS_NAMESPACE], () => ctx.slots.inject(
+    'plugins.item',
+    () => ctx.slots.register(
       {
-        name: 'settings.plugins.tab',
+        name: 'plugins.item',
         id: TAVILY_SETTINGS_NAMESPACE,
         order: 40,
         // A thunk, so the label follows a language switch without re-registering
@@ -101,25 +97,11 @@ export function registerConfigCard(ctx: Context): void {
         // Declaring the namespace also puts the framework's own `t` seat on the
         // props; ours wins the merge and carries the interpolation fallback.
         locale: TAVILY_SETTINGS_NAMESPACE,
-        inject: () => ({ card: form, view: 'page', t }),
-      },
-      ConfigCard,
-    ))
-    const offItem = ctx.slots.inject('plugins.item', () => ctx.slots.register(
-      {
-        name: 'plugins.item',
-        id: TAVILY_SETTINGS_NAMESPACE,
-        order: 40,
-        label: () => t('title'),
-        locale: TAVILY_SETTINGS_NAMESPACE,
         inject: () => ({ card: form, t }),
       },
       ConfigCard,
-    ))
-    // The callback must return a function: `whileServed` keys its "already
-    // registered" guard on it, so returning void would re-register on every sync.
-    return () => { offTab?.(); offItem?.() }
-  }), 'tavily: config page')
+    ),
+  )), 'tavily: config page')
 }
 
 // ---- Locale seam ----
@@ -207,7 +189,6 @@ function summaryRow(form: CardForm, shell: CardShell, t: TranslateLike): React.R
  * @returns the card element.
  */
 function ConfigCard({ t, card, view }: ConfigCardProps): React.ReactElement {
-  const [open, setOpen] = React.useState(false)
   // MCP hand-off confirmation flow: 'asking' when the user flips useMcp on,
   // 'guide' after they answer "not configured yet" (shows the patch snippet).
   const [mcpConfirm, setMcpConfirm] = React.useState<'idle' | 'asking' | 'guide'>('idle')
@@ -242,58 +223,36 @@ function ConfigCard({ t, card, view }: ConfigCardProps): React.ReactElement {
   const key = form.keyState()
   const onMcpToggled = (checked: boolean) => setMcpConfirm(checked ? 'asking' : 'idle')
 
-  // A `div`, not the `li` this card started as: BOTH hosts mount an item inside a
-  // non-list container (`div.panel`, `div[role=tabpanel]`, `section`), where a
-  // list item is invalid structure and is announced oddly by assistive tech. The
-  // class names are unchanged — every rule in `styles.ts` is a `.dstav-*` class.
+  // No collapsible header: the manager's detail page already shows the plugin's
+  // name and this entry's summary line above the config section, so a second
+  // title with an expand step would be pure ceremony — the fields render directly
+  // (0.2.2, where the manager is the only host of this page). A `div`, not the
+  // `li` this card started as: the host mounts the item inside a `section`, where
+  // a list item is invalid structure and is announced oddly by assistive tech.
+  // The class names are unchanged — every rule in `styles.ts` is a `.dstav-*` class.
   return React.createElement(
     'div',
-    { className: open ? 'dstav-card dstav-card-open' : 'dstav-card' },
-    React.createElement(
-      'button',
-      {
-        type: 'button',
-        className: 'dstav-header',
-        'aria-expanded': open,
-        onClick: () => setOpen(current => !current),
-      },
-      React.createElement(
-        'span',
-        { className: 'dstav-head-text' },
-        React.createElement('span', { className: 'dstav-name' }, t('title')),
-        React.createElement('span', { className: 'dstav-description' }, t('description')),
+    { className: 'dstav-body' },
+    shell.writable
+      ? null
+      : React.createElement(
+        'p',
+        { className: 'dstav-read-only', role: 'status' },
+        t('readOnly.note'),
       ),
-      shell.dirty || key.dirty
-        ? React.createElement('span', { className: 'dstav-badge dstav-badge-info' }, t('badge.unsaved'))
-        : null,
-      chevron(open),
-    ),
-    open
-      ? React.createElement(
-        'div',
-        { className: 'dstav-body' },
-        shell.writable
-          ? null
-          : React.createElement(
-            'p',
-            { className: 'dstav-read-only', role: 'status' },
-            t('readOnly.note'),
-          ),
-        React.createElement(KeyField, { form, keyState: key, t }),
-        // Field order is the model's; the toggle that opens the MCP guide is the
-        // only field the view reacts to beyond staging its draft.
-        FIELDS.map(spec => React.createElement(FieldRow, {
-          key: spec.field,
-          form,
-          spec,
-          shell,
-          t,
-          onBooleanToggle: spec.field === 'useMcp' ? onMcpToggled : undefined,
-        })),
-        React.createElement(McpPanel, { state: mcpConfirm, set: setMcpConfirm, form, t }),
-        footer(shell, form, key.dirty, t),
-      )
-      : null,
+    React.createElement(KeyField, { form, keyState: key, t }),
+    // Field order is the model's; the toggle that opens the MCP guide is the
+    // only field the view reacts to beyond staging its draft.
+    FIELDS.map(spec => React.createElement(FieldRow, {
+      key: spec.field,
+      form,
+      spec,
+      shell,
+      t,
+      onBooleanToggle: spec.field === 'useMcp' ? onMcpToggled : undefined,
+    })),
+    React.createElement(McpPanel, { state: mcpConfirm, set: setMcpConfirm, form, t }),
+    footer(shell, form, key.dirty, t),
   )
 }
 
@@ -762,26 +721,6 @@ function McpPanel({ state, set, form, t }: McpPanelProps): React.ReactElement | 
       // instead of living duplicated inside the dictionary.
       t('mcp.guide.note', { tools: Object.values(TAVILY_MCP_TOOLS).join(' / ') }),
     ),
-  )
-}
-
-/** Inline 14×14 chevron, matching the built-in card's glyph (path copied verbatim). */
-function chevron(open: boolean): React.ReactElement {
-  return React.createElement(
-    'svg',
-    {
-      className: open ? 'dstav-chevron dstav-chevron-open' : 'dstav-chevron',
-      width: 14,
-      height: 14,
-      viewBox: '0 0 14 14',
-      fill: 'none',
-      xmlns: 'http://www.w3.org/2000/svg',
-      'aria-hidden': true,
-    },
-    React.createElement('path', {
-      d: 'M11.8486 5.5L11.4238 5.92383L8.69727 8.65137C8.44157 8.90706 8.21562 9.13382 8.01172 9.29785C7.79912 9.46883 7.55595 9.61756 7.25 9.66602C7.08435 9.69222 6.91565 9.69222 6.75 9.66602C6.44405 9.61756 6.20088 9.46883 5.98828 9.29785C5.78438 9.13382 5.55843 8.90706 5.30273 8.65137L2.57617 5.92383L2.15137 5.5L3 4.65137L3.42383 5.07617L6.15137 7.80273C6.42595 8.07732 6.59876 8.24849 6.74023 8.3623C6.87291 8.46904 6.92272 8.47813 6.9375 8.48047C6.97895 8.48703 7.02105 8.48703 7.0625 8.48047C7.07728 8.47813 7.12709 8.46904 7.25977 8.3623C7.40124 8.24849 7.57405 8.07732 7.84863 7.80273L10.5762 5.07617L11 4.65137L11.8486 5.5Z',
-      fill: 'currentColor',
-    }),
   )
 }
 

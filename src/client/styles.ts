@@ -33,34 +33,10 @@ const CARD_CSS = `
   padding: 0;
 }
 .dstav-card:hover { border-color: var(--dsw-alias-label-dimmed); }
-.dstav-card-open { background: var(--dsw-alias-bg-layer-2); border-color: var(--dsw-alias-label-dimmed); }
-.dstav-header {
-  width: 100%; appearance: none; border: 0; background: none; font: inherit;
-  color: inherit; text-align: left; cursor: pointer;
-  display: flex; align-items: center; gap: 12px;
-  padding: 14px 16px; border-radius: 12px;
-}
-.dstav-head-text {
-  display: flex; flex-direction: column; gap: 2px;
-  min-width: 0; flex: 1;
-}
-.dstav-name {
-  color: var(--dsw-alias-label-primary);
-  font-size: 15px; font-weight: 600; line-height: 1.4;
-}
-.dstav-description {
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 13px; line-height: 1.5;
-}
-.dstav-chevron {
-  color: var(--dsw-alias-label-secondary);
-  transition: transform .16s;
-  flex-shrink: 0;
-}
-.dstav-chevron-open { transform: rotate(180deg); }
+/* The form body renders directly on the manager's detail page (no collapsible
+   header since 0.2.2 — the page already shows the plugin's name and summary). */
 .dstav-body {
-  border-top: 1px solid var(--dsw-alias-border-l2);
-  padding: 4px 16px 16px;
+  padding: 0;
   display: flex; flex-direction: column; gap: 6px;
 }
 .dstav-read-only {

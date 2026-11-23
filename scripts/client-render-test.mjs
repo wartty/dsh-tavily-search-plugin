@@ -13,12 +13,16 @@
  * 然后真的调用 `apply(ctx)`，把插槽注册拿到的组件按**宿主的 props 合并顺序**
  * （`...injected, ...ownerProps`，owner 胜出，见
  * `dsh-client-ui-renderer/lib/client.js:771-777`）渲染出来。覆盖的缺陷：
+ *   R1 0.2.2 单槽注册：只向 `plugins.item` 注册；`settings.plugins.tab` 必须保持
+ *      零注册（旧设置区由只读 inventory 接管，第三方配置页按规范只属于 manager）
  *   F1 prop 撞名（owner 的 `form` 顶掉控制器 → 崩溃 + entry 被除名）
  *   F2 日期草稿必须在视图里可见地标红
  *   F4 clipboard 缺失 / 写失败都要进失败态，且重进 guide 要复位
  *   F5 根元素不是 `li`
  *   F6 加载期 summary 不得谎报"只读"
  *   F8 label/aria-describedby 的程序化关联、实例内唯一 id、双卡片不撞 id
+ *   R2 折叠头移除：`view: 'page'` 直接渲染表单体 —— page 树里不得再出现
+ *      `.dstav-header` / `aria-expanded` 按钮 / chevron；`view: 'summary'` 不受影响
  *
  * 运行前提：先构建（`pnpm run build` / `./node_modules/.bin/tsdown`）。
  */
@@ -445,34 +449,33 @@ const changeText = (node, value) => node.props?.onChange?.({ target: { value } }
 const toggle = (node, checked) => node.props?.onChange?.({ target: { checked } })
 const flushMicrotasks = () => new Promise(resolve => setImmediate(resolve))
 
-/** 展开卡片（字段只在展开后才渲染，和真实宿主一致）。 */
-function expand(view) {
-  click(byClass(view.tree, 'dstav-header')[0])
-  return view
-}
+// 0.2.2 起没有折叠头：`view: 'page'` 挂载即渲染表单体，不存在"展开"步骤 ——
+// 旧的 expand() helper（点击 .dstav-header）随之删除。
 
 /** 装/拆一个可用的 navigator.clipboard（Node 自带的 navigator 只有 userAgent）。 */
 function setClipboard(clipboard) {
   Object.defineProperty(globalThis, 'navigator', { value: { clipboard }, configurable: true, writable: true })
 }
 
-// ---- 4) 注册契约 + F1 ----
+// ---- 4) 注册契约（R1 单槽） + F1 ----
 
 const harness = createHarness({ locale: 'zh' })
-noThrow(() => clientModule.apply(harness.ctx), 'apply(ctx) 在两个宿主槽位都注册成功')
+noThrow(() => clientModule.apply(harness.ctx), 'apply(ctx) 注册成功')
 // 让 CardForm 构造时的首次凭证 describe 落地，后面才读得到"已配置"。
 await flushMicrotasks()
 const tab = harness.registration('settings.plugins.tab')
 const item = harness.registration('plugins.item')
-check(tab !== undefined && item !== undefined, 'settings.plugins.tab 与 plugins.item 各注册一份')
-check(tab?.options.id === 'web-search-tavily' && item?.options.id === 'web-search-tavily', '两个槽位都用设置命名空间作为条目 id')
-check(tab?.options.locale === 'web-search-tavily' && tab?.options.label?.() === 'Tavily 网页搜索', 'tab 标签经 locale 服务解析为中文标题')
+check(item !== undefined, 'plugins.item 注册了一份条目')
+check(tab === undefined, 'R1: settings.plugins.tab 零注册（0.2.2 旧设置区由只读 inventory 接管，配置页只属于 Plugin Manager）')
+check(harness.state.registrations.length === 1, 'R1: apply 只产生这一份插槽注册')
+check(item?.options.id === 'web-search-tavily', '条目 id 仍是设置命名空间 web-search-tavily')
+const zhLabel = typeof item?.options.label === 'function' ? item.options.label() : undefined
+check(zhLabel === 'Tavily 网页搜索', 'label thunk 经 locale 服务解析为中文标题')
 
-const tabInjected = tab.options.inject()
 const itemInjected = item.options.inject()
-check(!('form' in tabInjected) && !('form' in itemInjected), 'F1: inject face 不再占用 owner 保留名 form')
-check('card' in tabInjected && 'card' in itemInjected, 'F1: 控制器改挂 card')
-check(tabInjected.view === 'page' && !('view' in itemInjected), 'F1: 只有空 props 的 tab 注入 view=page，manager 的 view 仍由 owner 决定')
+check(!('form' in itemInjected), 'F1: inject face 不占用 owner 保留名 form')
+check('card' in itemInjected, 'F1: 控制器挂在 card 上')
+check(!('view' in itemInjected), 'R1: 不注入 view —— 列表行与详情页的视图都由 manager（owner）传入')
 
 // owner props 就是宿主的 PluginConfigViewProps：view + form:{state,mutate}。
 const ownerForm = { state: { value: {} }, mutate() {} }
@@ -480,12 +483,22 @@ const itemProps = mergeProps(item, { view: 'page', form: ownerForm })
 const pageView = noThrow(() => react.mount(item.component, itemProps), 'F1: 传入 owner 的 form prop 渲染 view=page 不抛错')
 check(itemProps.card !== undefined && itemProps.form === ownerForm, 'F1: 注入的控制器仍在 card 上，owner 的 form 原样不动')
 check(pageView !== undefined && pageView.tree[0]?.type === 'div', 'F1: 渲染出真实的卡片根元素')
-expand(pageView)
+check(pageView !== undefined && classList(pageView.tree[0]).includes('dstav-body'), 'R2: page 视图直接渲染表单体（根元素就是 .dstav-body，无折叠头包裹）')
 check(pageView?.text.includes('每次搜索最多结果数') === true, 'F1: 控制器仍生效（字段标签照常渲染）')
 check(controlForLabel(pageView?.tree ?? [], '每次搜索最多结果数')?.props?.value === '7', 'F1: 控件初值来自控制器读到的快照（maxResults=7）')
 // 控制器 publish 后视图必须跟着更新：证明 useSyncExternalStore 订阅的是我们自己的 form。
 itemProps.card.edit('maxResults', '9')
 check(controlForLabel(pageView?.tree ?? [], '每次搜索最多结果数')?.props?.value === '9', 'F1: 控制器 publish 后视图同步重渲染（订阅没被 owner prop 切断）')
+
+// ---- 4b) R2：折叠头移除的回归守卫 ----
+
+// page 树里不得再出现任何折叠头痕迹：没有 .dstav-header、没有带 aria-expanded
+// 的按钮、没有 chevron；标题/描述/summary 由 manager 详情页与它自己渲染的
+// summary 行负责，卡片只剩表单体。
+check(findAll(pageView?.tree ?? [], node => classList(node).includes('dstav-header')).length === 0, 'R2: page 树里没有 .dstav-header')
+check(findAll(pageView?.tree ?? [], node => node.props?.['aria-expanded'] !== undefined).length === 0, 'R2: page 树里没有带 aria-expanded 的元素（无展开语义）')
+check(findAll(pageView?.tree ?? [], node => classList(node).some(name => name.startsWith('dstav-chevron'))).length === 0, 'R2: page 树里没有 chevron 图标')
+check(findAll(pageView?.tree ?? [], node => classList(node).includes('dstav-card-open')).length === 0, 'R2: page 树里没有 .dstav-card-open 展开态类')
 
 // ---- 5) summary 视图 ----
 
@@ -494,24 +507,29 @@ const summaryView = noThrow(() => react.mount(item.component, summaryProps), 'vi
 check(summaryView?.tree[0]?.type === 'span' && classList(summaryView.tree[0]).includes('dstav-summary'), 'summary 是 dstav-summary 一行')
 check(summaryView?.text.includes('Tavily API 搜索提供方') === true, 'summary 文案来自描述')
 check(summaryView?.text.includes('密钥已配置') === true, 'summary 带上凭证状态')
+check(findAll(summaryView?.tree ?? [], node => classList(node).includes('dstav-header')).length === 0, 'R2: summary 视图同样没有 .dstav-header（一行 span 不受折叠头移除影响）')
+check(findAll(summaryView?.tree ?? [], node => node.type === 'button').length === 0, 'R2: summary 行里没有任何按钮（旧头部的展开按钮/未保存徽标不再由卡片渲染）')
 
 // ---- 6) t() 全链路 ----
 
 const dictionaries = harness.state.dictionaries.get('web-search-tavily')
 check(dictionaries !== undefined && typeof dictionaries.en?.title === 'string' && typeof dictionaries.zh?.title === 'string', '字典以 namespace 注册，en/zh 两半在同一次注册里')
-check(pageView?.text.includes('Tavily 网页搜索') === true, '中文文案经 locale.bind 出现在渲染结果里')
+// 0.2.2 起卡片自身不渲染标题（标题/描述由 manager 详情页负责），页面里的中文
+// 文案改为验证 locale 驱动的表单体文本；标题的 locale 解析见上面 label thunk 断言。
+check(pageView?.text.includes('保存') === true, '中文文案经 locale.bind 出现在渲染结果里（footer 的保存按钮）')
 check(pageView?.text.includes('TAVILY_API_KEY') === true, 't(key, params) 的插值一路到视图（key.hint 的 {ref}）')
 const englishHarness = createHarness({ locale: 'en' })
 clientModule.apply(englishHarness.ctx)
-const englishView = expand(react.mount(englishHarness.registration('plugins.item').component, mergeProps(englishHarness.registration('plugins.item'), { view: 'page' })))
-check(englishView.text.includes('Tavily Web Search') === true, 'en 语言下标题切到英文')
+const englishItem = englishHarness.registration('plugins.item')
+const englishView = react.mount(englishItem.component, mergeProps(englishItem, { view: 'page' }))
+check(typeof englishItem.options.label === 'function' && englishItem.options.label() === 'Tavily Web Search', 'en 语言下标题经 label thunk 切到英文')
 check(englishView.text.includes('Endpoint') === true, 'en 语言下字段标签是英文')
+check(englishView.text.includes('Save') === true, 'en 语言下 footer 是英文（表单体整体跟随语言）')
 
 // ---- 7) F4：复制配置的失败态与复位 ----
 
-/** 走到 guide 态：展开卡片 → 打开 useMcp → 回答"未配置"。 */
+/** 走到 guide 态：打开 useMcp → 回答"未配置"（0.2.2 无折叠头，挂载即表单）。 */
 function openGuide(view) {
-  click(byClass(view.tree, 'dstav-header')[0])
   toggle(byClass(view.tree, 'dstav-checkbox')[0], true)
   click(byClass(view.tree, 'dstav-mcp-no')[0])
   return byClass(view.tree, 'dstav-mcp-panel')[0]
@@ -552,7 +570,7 @@ check(findAll(unmountedView?.tree ?? [], node => node.type === 'li').length === 
 // 独立的 harness：日期草稿不与前面几节的草稿互相污染。
 const dateHarness = createHarness({ locale: 'zh' })
 clientModule.apply(dateHarness.ctx)
-const dateView = expand(react.mount(dateHarness.registration('plugins.item').component, mergeProps(dateHarness.registration('plugins.item'), { view: 'page' })))
+const dateView = react.mount(dateHarness.registration('plugins.item').component, mergeProps(dateHarness.registration('plugins.item'), { view: 'page' }))
 const startInput = controlForLabel(dateView.tree, '起始日期')
 check(startInput !== undefined && startInput?.props?.type === 'text', '起始日期渲染出文本控件')
 changeText(startInput, '2026-1-1')
@@ -585,10 +603,10 @@ const idsInOneCard = findAll(ariaTree, node => typeof node.props?.id === 'string
 check(new Set(idsInOneCard).size === idsInOneCard.length, `F8: 单张卡片内 id 唯一（${idsInOneCard.length} 个）`)
 check(idsInOneCard.some(id => id.includes(':r')) === true, 'F8: id 由 useId 派生，不再是写死的 dstav-api-key / dstav-<field>')
 
-// 同一文档挂两份卡片（settings tab + manager 面板）时 id 不能撞。
+// 同一文档挂两份卡片（例如 Plugin Manager 列表行与详情页、或两个插件条目）时 id 不能撞。
 const secondHarness = createHarness({ locale: 'zh' })
 clientModule.apply(secondHarness.ctx)
-const secondView = expand(react.mount(secondHarness.registration('plugins.item').component, mergeProps(secondHarness.registration('plugins.item'), { view: 'page' })))
+const secondView = react.mount(secondHarness.registration('plugins.item').component, mergeProps(secondHarness.registration('plugins.item'), { view: 'page' }))
 const idsInSecondCard = findAll(secondView.tree, node => typeof node.props?.id === 'string').map(node => node.props.id)
 check(idsInSecondCard.length > 0 && idsInSecondCard.every(id => !idsInOneCard.includes(id)), 'F8: 两份卡片同文档时 id 互不冲突')
 
@@ -604,12 +622,12 @@ check(loadingView.text.includes('只读') === true, 'F6: status=ready 且不可�
 
 // ---- 12) F3：凭证三态 —— "没问到 / 问不到" 不得冒充 "未配置" ----
 
-/** 注册并挂一张展开的 page 卡片；`settle` 时先等首次凭证读取落地。 */
+/** 注册并挂一张 page 卡片（0.2.2 挂载即表单体，无需展开）；`settle` 时先等首次凭证读取落地。 */
 async function mountPage(harness, { settle = true } = {}) {
   clientModule.apply(harness.ctx)
   if (settle) await flushMicrotasks()
   const registration = harness.registration('plugins.item')
-  return expand(react.mount(registration.component, mergeProps(registration, { view: 'page' })))
+  return react.mount(registration.component, mergeProps(registration, { view: 'page' }))
 }
 
 /** 注册并挂一行 summary（凭证读取先落地）。 */
